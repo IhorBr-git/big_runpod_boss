@@ -159,6 +159,12 @@ else
     echo "ComfyUI already exists, skipping installation."
 fi
 
+# Upgrade PyTorch to cu130 for RTX 5090 Blackwell optimized CUDA operations.
+# The ComfyUI-Manager installer uses the cu121 index which installs cu128 wheels —
+# RTX 5090 needs cu130+ for optimized CUDA kernels (comfy_kitchen cuda/triton backends).
+echo "Upgrading ComfyUI's PyTorch to cu130 for RTX 5090..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
 # ==============================================================================
 # 4. Shared models directory
 # ==============================================================================
