@@ -93,14 +93,15 @@ python_cmd="python3.11"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
-# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8)
-export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
+# Install PyTorch cu130 — RTX 5090 (Blackwell) requires cu130+ for optimized CUDA ops.
+# Base image has cu128 which works but falls back to very slow generic code paths.
+export TORCH_COMMAND="pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's dev torch build
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
 EOF
 
-# ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
+# ---- Pre-create venv inheriting base image packages; torch will be upgraded to cu130 by webui.sh ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
     python3.11 -m venv --system-site-packages "$WEBUI_DIR/venv"
@@ -166,8 +167,8 @@ fi
 # PyTorch bundles its own CUDA runtime, so cu130 works even on a CUDA 12.8
 # base image as long as the host NVIDIA driver is new enough (RunPod RTX 5090
 # pods ship with a compatible driver).
-# echo "Upgrading ComfyUI's PyTorch to cu130 for RTX 5090 Blackwell support..."
-#"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+echo "Upgrading ComfyUI's PyTorch to cu130 for RTX 5090 Blackwell support..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # ==============================================================================
 # 4. Shared models directory
