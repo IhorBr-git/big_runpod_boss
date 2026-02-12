@@ -19,6 +19,7 @@ set -e
 
 WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
+MODELS_DIR="/workspace/models"
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
@@ -62,7 +63,7 @@ fi
 # 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/5] Installing system dependencies..."
+echo "[1/6] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
@@ -72,7 +73,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/5] Setting up A1111 WebUI..."
+echo "[2/6] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -96,7 +97,7 @@ export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's dev torch build
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --api"
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
 EOF
 
 # ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
@@ -130,7 +131,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/5] Setting up ComfyUI..."
+echo "[3/6] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -159,14 +160,70 @@ else
 fi
 
 # ==============================================================================
-# 4. Cleanup
+# 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/5] Cleaning up..."
+echo "[4/6] Setting up shared models directory..."
+echo "========================================"
+
+# Create shared model directories at /workspace/models/
+mkdir -p "$MODELS_DIR"/{checkpoints,vae,loras,embeddings,controlnet,upscale_models,hypernetworks,clip,clip_vision}
+
+# --- ComfyUI: extra_model_paths.yaml ---
+echo "Configuring ComfyUI to use shared models..."
+cat > "$COMFYUI_DIR/extra_model_paths.yaml" << 'YAML'
+shared_models:
+    base_path: /workspace/models/
+    checkpoints: checkpoints/
+    vae: vae/
+    loras: loras/
+    embeddings: embeddings/
+    controlnet: controlnet/
+    upscale_models: upscale_models/
+    hypernetworks: hypernetworks/
+    clip: clip/
+    clip_vision: clip_vision/
+YAML
+
+# --- A1111: symlink model directories to shared location ---
+echo "Symlinking A1111 model directories to shared models..."
+declare -A A1111_MAP=(
+    ["$WEBUI_DIR/models/Stable-diffusion"]="$MODELS_DIR/checkpoints"
+    ["$WEBUI_DIR/models/VAE"]="$MODELS_DIR/vae"
+    ["$WEBUI_DIR/models/Lora"]="$MODELS_DIR/loras"
+    ["$WEBUI_DIR/models/hypernetworks"]="$MODELS_DIR/hypernetworks"
+    ["$WEBUI_DIR/models/ESRGAN"]="$MODELS_DIR/upscale_models"
+    ["$WEBUI_DIR/models/ControlNet"]="$MODELS_DIR/controlnet"
+)
+
+for src in "${!A1111_MAP[@]}"; do
+    dst="${A1111_MAP[$src]}"
+    if [ -d "$src" ] && [ ! -L "$src" ]; then
+        # Move any pre-existing models to the shared directory
+        cp -rn "$src"/* "$dst"/ 2>/dev/null || true
+        rm -rf "$src"
+    fi
+    ln -sfn "$dst" "$src"
+done
+
+# A1111 embeddings live at top level, not inside models/
+if [ -d "$WEBUI_DIR/embeddings" ] && [ ! -L "$WEBUI_DIR/embeddings" ]; then
+    cp -rn "$WEBUI_DIR/embeddings"/* "$MODELS_DIR/embeddings"/ 2>/dev/null || true
+    rm -rf "$WEBUI_DIR/embeddings"
+fi
+ln -sfn "$MODELS_DIR/embeddings" "$WEBUI_DIR/embeddings"
+
+echo "Shared models directory ready at $MODELS_DIR"
+
+# ==============================================================================
+# 5. Cleanup
+# ==============================================================================
+echo "========================================"
+echo "[5/6] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 
 # ==============================================================================
-# 5. Start all services
+# 6. Start all services
 # ==============================================================================
 start_services
