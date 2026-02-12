@@ -159,11 +159,12 @@ else
     echo "ComfyUI already exists, skipping installation."
 fi
 
-# Upgrade PyTorch to cu130 for RTX 5090 Blackwell optimized CUDA operations.
-# The ComfyUI-Manager installer uses the cu121 index which installs cu128 wheels —
-# RTX 5090 needs cu130+ for optimized CUDA kernels (comfy_kitchen cuda/triton backends).
-echo "Upgrading ComfyUI's PyTorch to cu130 for RTX 5090..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
+# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
+# compatibility with the driver while still supporting RTX 5090 Blackwell arch.
+# NOTE: cu130 requires a newer driver (>=CUDA 13.0) and will crash on CUDA 12.8 pods.
+echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # ==============================================================================
 # 4. Shared models directory
