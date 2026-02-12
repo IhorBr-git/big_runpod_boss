@@ -13,7 +13,7 @@
 # individual container start commands.
 #
 # Container Start Command:
-#   bash -c 'cd /workspace && wget <raw-url>/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
+#   bash -c '[ -d "/workspace/stable-diffusion-webui" ] && [ -d "/workspace/ComfyUI" ] && ((cd /workspace && /workspace/run_gpu.sh) & (cd /workspace/stable-diffusion-webui && bash webui.sh -f) & /start.sh) || (cd /workspace && wget https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh)'
 
 set -e
 
