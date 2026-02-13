@@ -26,10 +26,21 @@ git -C /workspace/ComfyUI/custom_nodes clone https://github.com/dsigmabcn/comfyu
 echo "clone ComfyUI-RunpodDirect"
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 
+# Install File Browser (web-based file manager on port 8080)
+echo "Installing File Browser..."
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+
+FB_DB="/workspace/.filebrowser.db"
+if [ ! -f "$FB_DB" ]; then
+    filebrowser config init --database "$FB_DB"
+    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
+    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+fi
+
 # Clean up the installation scripts.
 echo "Cleaning up..."
 rm install_script.sh run_cpu.sh install-comfyui-venv-linux.sh
 
-# Start the main Runpod service and the ComfyUI service in the background.
-echo "Starting ComfyUI and Runpod services..."
-(/start.sh & /workspace/run_gpu.sh)
+# Start the main Runpod service, ComfyUI, and File Browser in the background.
+echo "Starting ComfyUI, File Browser, and Runpod services..."
+(/start.sh & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)

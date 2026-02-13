@@ -19,7 +19,7 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 # ---- Install system dependencies (Debian-based) ----
 echo "Installing system dependencies..."
 apt-get update && apt-get install -y --no-install-recommends \
-    wget git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -70,11 +70,23 @@ git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensi
 git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper"
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale"
 
+# ---- Install File Browser (web-based file manager on port 8080) ----
+echo "Installing File Browser..."
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+
+FB_DB="/workspace/.filebrowser.db"
+if [ ! -f "$FB_DB" ]; then
+    filebrowser config init --database "$FB_DB"
+    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
+    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+fi
+
 # ---- Clean up ----
 echo "Cleaning up..."
 rm -f /workspace/install_script.sh
 
 # ---- Start services ----
-echo "Starting RunPod handler and A1111 WebUI..."
+echo "Starting RunPod handler, A1111 WebUI, and File Browser..."
 /start.sh &
+filebrowser --database "$FB_DB" &
 cd "$WEBUI_DIR" && bash webui.sh -f

@@ -6,6 +6,7 @@
 # This script installs and launches BOTH:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
+#   - File Browser                           (port 8080)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
 # On pod restart (both dirs already exist) the script skips installation
@@ -20,6 +21,7 @@ set -e
 WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
+FB_DB="/workspace/.filebrowser.db"
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
@@ -31,10 +33,16 @@ start_services() {
     echo "  - RunPod handler  (/start.sh)"
     echo "  - A1111 WebUI     (port 3000)"
     echo "  - ComfyUI         (port 8188)"
+    echo "  - File Browser    (port 8080)"
     echo "========================================"
 
     # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
     trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
+
+    # Ensure File Browser binary is available (not persisted across pod restarts)
+    if ! command -v filebrowser &> /dev/null; then
+        curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+    fi
 
     # Start RunPod handler (only once for both services)
     /start.sh &
@@ -44,6 +52,9 @@ start_services() {
 
     # Start ComfyUI
     /workspace/run_gpu.sh &
+
+    # Start File Browser
+    filebrowser --database "$FB_DB" &
 
     # Keep the container alive as long as any service is running
     wait
@@ -63,17 +74,17 @@ fi
 # 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/6] Installing system dependencies..."
+echo "[1/7] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-    wget git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
     && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/6] Setting up A1111 WebUI..."
+echo "[2/7] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -134,7 +145,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/6] Setting up ComfyUI..."
+echo "[3/7] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -175,7 +186,7 @@ echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility...
 # 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/6] Setting up shared models directory..."
+echo "[4/7] Setting up shared models directory..."
 echo "========================================"
 
 # Create shared models root
@@ -241,14 +252,29 @@ echo "Shared subdirectories:"
 ls -1 "$MODELS_DIR"
 
 # ==============================================================================
-# 5. Cleanup
+# 5. File Browser (web-based file manager on port 8080)
 # ==============================================================================
 echo "========================================"
-echo "[5/6] Cleaning up..."
+echo "[5/7] Setting up File Browser..."
+echo "========================================"
+
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+
+if [ ! -f "$FB_DB" ]; then
+    filebrowser config init --database "$FB_DB"
+    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
+    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+fi
+
+# ==============================================================================
+# 6. Cleanup
+# ==============================================================================
+echo "========================================"
+echo "[6/7] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 
 # ==============================================================================
-# 6. Start all services
+# 7. Start all services
 # ==============================================================================
 start_services
