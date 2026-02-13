@@ -178,40 +178,50 @@ echo "========================================"
 echo "[4/6] Setting up shared models directory..."
 echo "========================================"
 
-# Create shared model directories at /workspace/models/
-mkdir -p "$MODELS_DIR"/{checkpoints,vae,loras,embeddings,controlnet,upscale_models,hypernetworks,clip,clip_vision}
+# Create shared models root
+mkdir -p "$MODELS_DIR"
 
-# --- ComfyUI: extra_model_paths.yaml ---
-echo "Configuring ComfyUI to use shared models..."
-cat > "$COMFYUI_DIR/extra_model_paths.yaml" << 'YAML'
-shared_models:
-    base_path: /workspace/models/
-    checkpoints: checkpoints/
-    vae: vae/
-    loras: loras/
-    embeddings: embeddings/
-    controlnet: controlnet/
-    upscale_models: upscale_models/
-    hypernetworks: hypernetworks/
-    clip: clip/
-    clip_vision: clip_vision/
-YAML
+# --- ComfyUI: symlink ALL model subdirectories to the shared location ---
+# Dynamically discover every folder inside ComfyUI/models/ so nothing is missed
+# (checkpoints, clip, clip_vision, controlnet, diffusers, diffusion_models,
+#  embeddings, gligen, hypernetworks, loras, photomaker, style_models,
+#  unet, upscale_models, vae, vae_approx, …and any future additions).
+echo "Symlinking ComfyUI model directories to shared models..."
+for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
+    # Skip if the glob matched nothing
+    [ -d "$comfy_subdir" ] || continue
 
-# --- A1111: symlink model directories to shared location ---
+    dir_name="$(basename "$comfy_subdir")"
+    shared_subdir="$MODELS_DIR/$dir_name"
+    mkdir -p "$shared_subdir"
+
+    # If it's a real directory (not already a symlink), migrate its contents
+    if [ ! -L "$comfy_subdir" ]; then
+        cp -rn "$comfy_subdir"* "$shared_subdir"/ 2>/dev/null || true
+        rm -rf "$comfy_subdir"
+    fi
+    ln -sfn "$shared_subdir" "${comfy_subdir%/}"
+done
+
+# --- A1111: symlink model directories to the same shared location ---
+# Map A1111 folder names → shared folder names (where they differ)
 echo "Symlinking A1111 model directories to shared models..."
 declare -A A1111_MAP=(
-    ["$WEBUI_DIR/models/Stable-diffusion"]="$MODELS_DIR/checkpoints"
-    ["$WEBUI_DIR/models/VAE"]="$MODELS_DIR/vae"
-    ["$WEBUI_DIR/models/Lora"]="$MODELS_DIR/loras"
-    ["$WEBUI_DIR/models/hypernetworks"]="$MODELS_DIR/hypernetworks"
-    ["$WEBUI_DIR/models/ESRGAN"]="$MODELS_DIR/upscale_models"
-    ["$WEBUI_DIR/models/ControlNet"]="$MODELS_DIR/controlnet"
+    ["Stable-diffusion"]="checkpoints"
+    ["VAE"]="vae"
+    ["Lora"]="loras"
+    ["hypernetworks"]="hypernetworks"
+    ["ESRGAN"]="upscale_models"
+    ["ControlNet"]="controlnet"
 )
 
-for src in "${!A1111_MAP[@]}"; do
-    dst="${A1111_MAP[$src]}"
+for a1111_name in "${!A1111_MAP[@]}"; do
+    shared_name="${A1111_MAP[$a1111_name]}"
+    src="$WEBUI_DIR/models/$a1111_name"
+    dst="$MODELS_DIR/$shared_name"
+    mkdir -p "$dst"
+
     if [ -d "$src" ] && [ ! -L "$src" ]; then
-        # Move any pre-existing models to the shared directory
         cp -rn "$src"/* "$dst"/ 2>/dev/null || true
         rm -rf "$src"
     fi
@@ -219,6 +229,7 @@ for src in "${!A1111_MAP[@]}"; do
 done
 
 # A1111 embeddings live at top level, not inside models/
+mkdir -p "$MODELS_DIR/embeddings"
 if [ -d "$WEBUI_DIR/embeddings" ] && [ ! -L "$WEBUI_DIR/embeddings" ]; then
     cp -rn "$WEBUI_DIR/embeddings"/* "$MODELS_DIR/embeddings"/ 2>/dev/null || true
     rm -rf "$WEBUI_DIR/embeddings"
@@ -226,6 +237,8 @@ fi
 ln -sfn "$MODELS_DIR/embeddings" "$WEBUI_DIR/embeddings"
 
 echo "Shared models directory ready at $MODELS_DIR"
+echo "Shared subdirectories:"
+ls -1 "$MODELS_DIR"
 
 # ==============================================================================
 # 5. Cleanup
