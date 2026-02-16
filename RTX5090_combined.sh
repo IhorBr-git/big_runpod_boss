@@ -157,9 +157,9 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     chmod +x install-comfyui-venv-linux.sh
     ./install-comfyui-venv-linux.sh
 
-    # Add the --listen flag to run_gpu.sh for network access
-    echo "Configuring ComfyUI for network access..."
-    sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
+    # Add the --listen flag and --fast fp16_accumulation to run_gpu.sh
+    echo "Configuring ComfyUI for network access and FP16 accumulation..."
+    sed -i "$ s/$/ --listen --fast fp16_accumulation /" /workspace/run_gpu.sh
     chmod +x /workspace/run_gpu.sh
 
     # Install custom nodes
