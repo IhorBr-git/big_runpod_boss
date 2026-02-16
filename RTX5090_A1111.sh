@@ -77,8 +77,7 @@ curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bas
 FB_DB="/workspace/.filebrowser.db"
 if [ ! -f "$FB_DB" ]; then
     filebrowser config init --database "$FB_DB"
-    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
-    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --noauth --database "$FB_DB"
 fi
 
 # ---- Clean up ----
