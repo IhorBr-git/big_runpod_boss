@@ -3,9 +3,10 @@
 # -- Combined Installation & Start Script for RTX 5090 ---
 # Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 #
-# This script installs and launches BOTH:
+# This script installs and launches:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
+#   - Ollama server (for comfyui-ollama)    (port 11434)
 #   - File Browser                           (port 8080)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
@@ -22,6 +23,7 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+OLLAMA_MODELS_DIR="/workspace/.ollama/models"
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
@@ -33,6 +35,7 @@ start_services() {
     echo "  - RunPod handler  (/start.sh)"
     echo "  - A1111 WebUI     (port 3000)"
     echo "  - ComfyUI         (port 8188)"
+    echo "  - Ollama server   (port 11434)"
     echo "  - File Browser    (port 8080)"
     echo "========================================"
 
@@ -44,8 +47,22 @@ start_services() {
         curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
     fi
 
+    # Ensure Ollama binary is available (not persisted across pod restarts)
+    if ! command -v ollama &> /dev/null; then
+        curl -fsSL https://ollama.com/install.sh | sh
+    fi
+
+    # Store Ollama models in /workspace so they persist across pod restarts
+    export OLLAMA_MODELS="$OLLAMA_MODELS_DIR"
+
     # Start RunPod handler (only once for both services)
     /start.sh &
+
+    # Start Ollama server
+    ollama serve &
+
+    # Pull the default model (no-op if already downloaded); runs in background
+    (sleep 5 && ollama pull qwen3-vl:4b) &
 
     # Start A1111 WebUI
     (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -74,17 +91,22 @@ fi
 # 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/7] Installing system dependencies..."
+echo "[1/8] Installing system dependencies & Ollama server..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
     && rm -rf /var/lib/apt/lists/*
 
+# ---- Install Ollama server ----
+echo "Installing Ollama server..."
+curl -fsSL https://ollama.com/install.sh | sh
+mkdir -p "$OLLAMA_MODELS_DIR"
+
 # ==============================================================================
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/7] Setting up A1111 WebUI..."
+echo "[2/8] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -145,7 +167,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/7] Setting up ComfyUI..."
+echo "[3/8] Setting up ComfyUI + comfyui-ollama..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -166,6 +188,7 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     echo "Installing ComfyUI custom nodes..."
     git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
     git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
+    git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/stavsap/comfyui-ollama.git
 
     # Clean up ComfyUI installer artifacts
     rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
@@ -182,11 +205,15 @@ fi
 echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
 "$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
+# Install comfyui-ollama Python dependencies
+echo "Installing comfyui-ollama dependencies..."
+"$COMFYUI_DIR/venv/bin/pip" install ollama==0.6.0 python-dotenv
+
 # ==============================================================================
 # 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/7] Setting up shared models directory..."
+echo "[4/8] Setting up shared models directory..."
 echo "========================================"
 
 # Create shared models root
@@ -255,7 +282,7 @@ ls -1 "$MODELS_DIR"
 # 5. File Browser (web-based file manager on port 8080)
 # ==============================================================================
 echo "========================================"
-echo "[5/7] Setting up File Browser..."
+echo "[5/8] Setting up File Browser..."
 echo "========================================"
 
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
@@ -270,7 +297,7 @@ fi
 # 6. Cleanup
 # ==============================================================================
 echo "========================================"
-echo "[6/7] Cleaning up..."
+echo "[6/8] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 

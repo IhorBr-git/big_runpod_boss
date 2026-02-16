@@ -2,7 +2,7 @@
 
 # -- Installation Script ---
 # This script handles the full installation of ComfyUI,
-# and comfyui-model-downloader
+# comfyui-model-downloader, comfyui-ollama, and Ollama LLM server
 
 # Change to the /workspace directory to ensure all files are downloaded correctly.
 cd /workspace
@@ -26,6 +26,11 @@ git -C /workspace/ComfyUI/custom_nodes clone https://github.com/dsigmabcn/comfyu
 echo "clone ComfyUI-RunpodDirect"
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 
+# Installing comfyui-ollama (LLM nodes for ComfyUI via Ollama).
+echo "clone comfyui-ollama"
+git -C /workspace/ComfyUI/custom_nodes clone https://github.com/stavsap/comfyui-ollama.git
+/workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-ollama/requirements.txt
+
 # Install File Browser (web-based file manager on port 8080)
 echo "Installing File Browser..."
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
@@ -37,10 +42,14 @@ if [ ! -f "$FB_DB" ]; then
     filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
 fi
 
+# Install Ollama LLM server (used by comfyui-ollama extension).
+echo "Installing Ollama..."
+curl -fsSL https://ollama.com/install.sh | sh
+
 # Clean up the installation scripts.
 echo "Cleaning up..."
 rm install_script.sh run_cpu.sh install-comfyui-venv-linux.sh
 
-# Start the main Runpod service, ComfyUI, and File Browser in the background.
-echo "Starting ComfyUI, File Browser, and Runpod services..."
-(/start.sh & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
+# Start the main Runpod service, ComfyUI, Ollama, and File Browser in the background.
+echo "Starting ComfyUI, Ollama, File Browser, and Runpod services..."
+(/start.sh & ollama serve & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
