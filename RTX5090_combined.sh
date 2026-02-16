@@ -13,7 +13,7 @@
 # RTX 5090 optimizations:
 #   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
 #   - PyTorch 2.9.1+cu130 (installed for Python 3.13 at startup)
-#   - Python 3.13 used for all venvs
+#   - Python 3.12 for A1111 (all pinned wheels available), Python 3.13 for ComfyUI
 #   - SDP attention (PyTorch native Flash Attention 2)
 #   - filebrowser, zstd, git, etc. already in base image
 #
@@ -95,14 +95,15 @@ echo "========================================"
 echo "[1/7] Installing extra system dependencies, Python 3.13 torch & Ollama..."
 echo "========================================"
 # Most deps are already in the base image (git, wget, curl, libgl1, zstd, etc.)
-# python3.13-venv is needed to create venvs with Python 3.13
+# python3.13-venv is needed for the ComfyUI venv (Python 3.13).
+# A1111 uses Python 3.12 (base image default) — no extra venv package needed.
 apt-get update && apt-get install -y --no-install-recommends \
     google-perftools bc libglib2.0-0 python3.13-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # The base image ships torch for the default Python 3.12; we need it for 3.13
-# so that --system-site-packages venvs inherit the correct torch build.
-echo "Installing PyTorch 2.9.1+cu130 for Python 3.13..."
+# so that the ComfyUI venv (--system-site-packages) inherits the correct torch build.
+echo "Installing PyTorch 2.9.1+cu130 for Python 3.13 (used by ComfyUI)..."
 python3.13 -m pip install --no-cache-dir \
     torch==2.9.1 torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu130
@@ -131,7 +132,7 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3.13"
+python_cmd="python3.12"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
@@ -143,10 +144,12 @@ export TORCH_COMMAND="pip --version"
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
 EOF
 
-# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.13) ----
+# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.12) ----
+# A1111 uses Python 3.12 (base image default) — its pinned dependencies
+# (Pillow 9.5.0, etc.) all have 3.12 wheels, avoiding build failures.
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.13 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3.12 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in A1111 venv..."
