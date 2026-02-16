@@ -29,6 +29,15 @@ OLLAMA_MODELS_DIR="/workspace/.ollama/models"
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
+    # CUDA 13.0 forward-compat: required so cu130 PyTorch works on the 12.8 host driver.
+    # apt packages are not persisted across pod restarts, so reinstall if missing.
+    if [ ! -d /usr/local/cuda-13.0/compat ]; then
+        echo "Installing CUDA 13.0 forward-compat driver..."
+        apt-get update && apt-get install -y --no-install-recommends cuda-compat-13-0 \
+            && rm -rf /var/lib/apt/lists/*
+    fi
+    export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}
+
     echo "========================================"
     echo "Starting services..."
     echo "========================================"
@@ -95,8 +104,13 @@ echo "[1/8] Installing system dependencies & Ollama server..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
+    cuda-compat-13-0 \
     python3.13 python3.13-venv python3.13-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Make CUDA 13.0 compat libs visible to all processes (needed for cu130 PyTorch
+# to work on RunPod's CUDA 12.8 host driver)
+export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}
 
 # ---- Install Ollama server ----
 echo "Installing Ollama server..."
