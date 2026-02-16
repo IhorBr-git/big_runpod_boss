@@ -43,6 +43,13 @@ else
     cd "$WEBUI_DIR" && git pull
 fi
 
+# ---- Patch pinned dependencies incompatible with Python 3.13 ----
+# Pillow 9.5.0 has no wheel for Python 3.13 and its setup.py fails to build
+# from source (KeyError: '__version__'). Replace with 10.4.0 which fully
+# supports Python 3.13 and remains API-compatible with A1111.
+echo "Patching requirements_versions.txt for Python 3.13 compatibility..."
+sed -i 's/Pillow==9\.5\.0/Pillow==10.4.0/' "$WEBUI_DIR/requirements_versions.txt"
+
 # ---- Configure webui-user.sh ----
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
