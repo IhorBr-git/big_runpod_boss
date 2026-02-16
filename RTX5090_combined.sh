@@ -95,6 +95,7 @@ echo "[1/8] Installing system dependencies & Ollama server..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
+    python3.13 python3.13-venv python3.13-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install Ollama server ----
@@ -184,6 +185,23 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
     chmod +x /workspace/run_gpu.sh
 
+    # ---- Recreate ComfyUI venv with Python 3.13 + PyTorch cu130 ----
+    # The ComfyUI-Manager installer created a venv with the system Python (3.11).
+    # We need Python 3.13 with cu130 for full Blackwell (sm_120) kernel support.
+    echo "Recreating ComfyUI venv with Python 3.13..."
+    rm -rf "$COMFYUI_DIR/venv"
+    python3.13 -m venv "$COMFYUI_DIR/venv"
+
+    echo "Installing PyTorch cu130 for Blackwell (sm_120) support..."
+    "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
+    "$COMFYUI_DIR/venv/bin/pip" install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+    echo "Installing ComfyUI requirements..."
+    "$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/requirements.txt"
+
+    # Update run_gpu.sh to use the new Python 3.13 venv explicitly
+    sed -i 's|python |python3.13 |g' /workspace/run_gpu.sh
+
     # Install custom nodes
     echo "Installing ComfyUI custom nodes..."
     git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
@@ -195,15 +213,6 @@ if [ ! -d "$COMFYUI_DIR" ]; then
 else
     echo "ComfyUI already exists, skipping installation."
 fi
-
-# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
-# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
-# compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
-# NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
-# driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
-# Once RunPod updates their drivers to CUDA 13.0+, switch this to cu130.
-echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # Install comfyui-ollama Python dependencies
 echo "Installing comfyui-ollama dependencies..."
