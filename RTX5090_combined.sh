@@ -179,9 +179,11 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     chmod +x install-comfyui-venv-linux.sh
     ./install-comfyui-venv-linux.sh
 
-    # Add the --listen flag and --fast fp16_accumulation to run_gpu.sh
-    echo "Configuring ComfyUI for network access and FP16 accumulation..."
-    sed -i "$ s/$/ --listen --fast fp16_accumulation /" /workspace/run_gpu.sh
+    # Add --listen and --force-fp16 to run_gpu.sh
+    # --force-fp16: bypass fp8 code paths that may lack optimised Blackwell kernels
+    # NOTE: do NOT use --fast fp16_accumulation — those accumulation kernels need cu130+
+    echo "Configuring ComfyUI for network access and FP16 precision..."
+    sed -i "$ s/$/ --listen --force-fp16 /" /workspace/run_gpu.sh
     chmod +x /workspace/run_gpu.sh
 
     # Install custom nodes
@@ -196,14 +198,39 @@ else
     echo "ComfyUI already exists, skipping installation."
 fi
 
-# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
-# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
-# compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
-# NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
-# driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
-# Once RunPod updates their drivers to CUDA 13.0+, switch this to cu130.
-echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# ---- Force-install PyTorch NIGHTLY cu128 with sm_120 (Blackwell) kernels ----
+#
+# Why not cu130?  cu130 = CUDA 13.0 runtime.  RunPod's host NVIDIA driver only
+#   supports up to CUDA 12.8 — cu130 crashes at driver init.  (Tried in 08b4ca5.)
+#
+# Why not cu128 STABLE?  Stable cu128 wheels (PyTorch ≤2.7) were built without
+#   sm_120 kernels, so the GPU is detected on cuda:0 but every CUDA op silently
+#   falls back to CPU ("no kernel image available").
+#
+# The NIGHTLY cu128 index has confirmed sm_120 support (per PyTorch team).
+# We uninstall first because `--upgrade` won't switch CUDA backends when the
+# base version number is the same (e.g. both 2.7.0).
+#
+# TODO: once RunPod ships a CUDA 13.0+ driver, switch to cu130 stable for fully
+#       optimised Blackwell kernels.
+echo "Force-installing PyTorch nightly cu128 with Blackwell (sm_120) support..."
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
+"$COMFYUI_DIR/venv/bin/pip" install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+
+# Quick smoke-test: verify CUDA works on this GPU before continuing
+echo "Verifying CUDA / Blackwell (sm_120) support..."
+"$COMFYUI_DIR/venv/bin/python" -c "
+import torch, sys
+assert torch.cuda.is_available(), 'FATAL: CUDA not available'
+cap = torch.cuda.get_device_capability()
+name = torch.cuda.get_device_name()
+print(f'  GPU   : {name}')
+print(f'  Arch  : sm_{cap[0]*10 + cap[1]}  (Blackwell = sm_120)')
+print(f'  Torch : {torch.__version__}')
+x = torch.randn(64, 64, device='cuda')
+_ = torch.matmul(x, x)
+print('  Smoke-test: PASSED')
+" || { echo "FATAL: CUDA smoke-test failed — sm_120 kernels missing"; exit 1; }
 
 # Install comfyui-ollama Python dependencies
 echo "Installing comfyui-ollama dependencies..."
