@@ -10,6 +10,11 @@
 #   - File Browser                           (port 8080)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
+# Both A1111 and ComfyUI use the base image's torch 2.8.0 + CUDA 12.8.
+# The RunPod host driver natively supports RTX 5090; no cuda-compat layer
+# is needed (cuda-compat-13-0 actually breaks CUDA on RTX 5090 with
+# Error 804: "forward compatibility was attempted on non supported HW").
+#
 # On pod restart (both dirs already exist) the script skips installation
 # entirely and goes straight to starting services — same logic as the
 # individual container start commands.
@@ -29,15 +34,6 @@ OLLAMA_MODELS_DIR="/workspace/.ollama/models"
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
-    # CUDA 13.0 forward-compat: required so cu130 PyTorch works on the 12.8 host driver.
-    # apt packages are not persisted across pod restarts, so reinstall if missing.
-    if [ ! -d /usr/local/cuda-13.0/compat ]; then
-        echo "Installing CUDA 13.0 forward-compat driver..."
-        apt-get update && apt-get install -y --no-install-recommends cuda-compat-13-0 \
-            && rm -rf /var/lib/apt/lists/*
-    fi
-    export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}
-
     echo "========================================"
     echo "Starting services..."
     echo "========================================"
@@ -104,13 +100,7 @@ echo "[1/8] Installing system dependencies & Ollama server..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
-    cuda-compat-13-0 \
-    python3.13 python3.13-venv python3.13-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# Make CUDA 13.0 compat libs visible to all processes (needed for cu130 PyTorch
-# to work on RunPod's CUDA 12.8 host driver)
-export LD_LIBRARY_PATH=/usr/local/cuda-13.0/compat:${LD_LIBRARY_PATH:-}
 
 # ---- Install Ollama server ----
 echo "Installing Ollama server..."
@@ -142,9 +132,7 @@ venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 # Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8).
-# NOTE: RTX 5090 ideally needs cu130+ for optimized CUDA ops, but RunPod's host
-# driver only supports CUDA 12.8 (version 12080), so cu130 will crash.
-# cu128 works but with reduced performance on Blackwell GPUs.
+# The RunPod host driver natively supports RTX 5090 (Blackwell).
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's dev torch build
@@ -199,22 +187,16 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
     chmod +x /workspace/run_gpu.sh
 
-    # ---- Recreate ComfyUI venv with Python 3.13 + PyTorch cu130 ----
-    # The ComfyUI-Manager installer created a venv with the system Python (3.11).
-    # We need Python 3.13 with cu130 for full Blackwell (sm_120) kernel support.
-    echo "Recreating ComfyUI venv with Python 3.13..."
+    # ---- Recreate ComfyUI venv with system-site-packages ----
+    # Inherit the base image's torch 2.8.0 + CUDA 12.8 (same as A1111).
+    # The RunPod host driver natively supports RTX 5090; no cuda-compat needed.
+    echo "Recreating ComfyUI venv with system-site-packages (torch from base image)..."
     rm -rf "$COMFYUI_DIR/venv"
-    python3.13 -m venv "$COMFYUI_DIR/venv"
+    python3.11 -m venv --system-site-packages "$COMFYUI_DIR/venv"
 
-    echo "Installing PyTorch cu130 for Blackwell (sm_120) support..."
     "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
-    "$COMFYUI_DIR/venv/bin/pip" install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
-
     echo "Installing ComfyUI requirements..."
     "$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/requirements.txt"
-
-    # Update run_gpu.sh to use the new Python 3.13 venv explicitly
-    sed -i 's|python |python3.13 |g' /workspace/run_gpu.sh
 
     # Install custom nodes
     echo "Installing ComfyUI custom nodes..."
