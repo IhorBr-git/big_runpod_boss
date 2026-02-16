@@ -129,10 +129,11 @@ venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 # Skip torch install — already provided by the base image (torch 2.9.1 + CUDA 13.0)
-export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
+# A1111 runs this as: python -m {TORCH_COMMAND}, so it must be a valid module command
+export TORCH_COMMAND="pip --version"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's torch build
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
 EOF
 
 # ---- Pre-create venv inheriting base image packages (torch 2.9.1+cu130) ----
@@ -190,8 +191,15 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     python3.12 -m venv --system-site-packages "$COMFYUI_DIR/venv"
 
     "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
-    echo "Installing ComfyUI requirements..."
-    "$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/requirements.txt"
+
+    # Install ComfyUI requirements — but keep the base image's torch stack
+    # (torch 2.9.1+cu130 with native CUDA 13.0 / Blackwell support).
+    # pip's dependency resolver would otherwise pull torch 2.10+cu12 via torchvision,
+    # which lacks Blackwell support and causes CUDA Error 804 at runtime.
+    echo "Installing ComfyUI requirements (keeping system torch)..."
+    grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' "$COMFYUI_DIR/requirements.txt" \
+        > /tmp/comfyui_reqs_filtered.txt
+    "$COMFYUI_DIR/venv/bin/pip" install -r /tmp/comfyui_reqs_filtered.txt
 
     # Install custom nodes
     echo "Installing ComfyUI custom nodes..."
