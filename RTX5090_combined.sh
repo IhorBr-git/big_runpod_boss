@@ -94,7 +94,7 @@ echo "========================================"
 echo "[1/8] Installing system dependencies & Ollama server..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Install Ollama server ----
