@@ -3,25 +3,15 @@
 # -- Combined Installation & Start Script for RTX 5090 ---
 # Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 #
-# This script installs and launches:
+# This script installs and launches BOTH:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
-#   - Ollama server (for comfyui-ollama)    (port 11434)
 #   - File Browser                           (port 8080)
-# on a single RunPod pod optimized for RTX 5090.
-#
-# Setup:
-#   - CUDA 12.8.1 with cuDNN — RTX 5090 supported via forward-compatible PTX
-#   - PyTorch 2.8.0+cu128 from base image (pre-installed for Python 3.11)
-#   - Python 3.11 for both A1111 and ComfyUI (single version, no conflicts)
-#   - SDP attention (PyTorch native Flash Attention 2)
-#
-# The critical step for GPU detection in ComfyUI is recreating its venv with
-# --system-site-packages so it inherits the base image's CUDA-enabled PyTorch.
-# Without this, pip may install a CPU-only torch and ComfyUI only sees CPU.
+# on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
 # On pod restart (both dirs already exist) the script skips installation
-# entirely and goes straight to starting services.
+# entirely and goes straight to starting services — same logic as the
+# individual container start commands.
 #
 # Container Start Command:
 #   bash -c '[ -d "/workspace/stable-diffusion-webui" ] && [ -d "/workspace/ComfyUI" ] && ((cd /workspace && /workspace/run_gpu.sh) & (cd /workspace/stable-diffusion-webui && bash webui.sh -f) & /start.sh) || (cd /workspace && wget https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh)'
@@ -32,10 +22,9 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
-OLLAMA_MODELS_DIR="/workspace/.ollama/models"
 
 # ------------------------------------------------------------------------------
-# start_services — launches all processes and waits
+# start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
     echo "========================================"
@@ -44,34 +33,19 @@ start_services() {
     echo "  - RunPod handler  (/start.sh)"
     echo "  - A1111 WebUI     (port 3000)"
     echo "  - ComfyUI         (port 8188)"
-    echo "  - Ollama server   (port 11434)"
     echo "  - File Browser    (port 8080)"
     echo "========================================"
 
     # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
     trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
 
-    # Ensure Ollama binary is available (not persisted across pod restarts)
-    if ! command -v ollama &> /dev/null; then
-        curl -fsSL https://ollama.com/install.sh | sh
-    fi
-
-    # Ensure filebrowser binary is available (not persisted across pod restarts)
+    # Ensure File Browser binary is available (not persisted across pod restarts)
     if ! command -v filebrowser &> /dev/null; then
         curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
     fi
 
-    # Store Ollama models in /workspace so they persist across pod restarts
-    export OLLAMA_MODELS="$OLLAMA_MODELS_DIR"
-
     # Start RunPod handler (only once for both services)
     /start.sh &
-
-    # Start Ollama server
-    ollama serve &
-
-    # Pull the default model (no-op if already downloaded); runs in background
-    (sleep 5 && ollama pull qwen3-vl:4b) &
 
     # Start A1111 WebUI
     (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -97,24 +71,14 @@ if [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
 fi
 
 # ==============================================================================
-# 1. System dependencies & Ollama server
+# 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/7] Installing extra system dependencies & Ollama..."
+echo "[1/7] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-    google-perftools bc libglib2.0-0 \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
     && rm -rf /var/lib/apt/lists/*
-
-# Install filebrowser if not present in base image
-if ! command -v filebrowser &> /dev/null; then
-    echo "Installing filebrowser..."
-    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-fi
-
-echo "Installing Ollama server..."
-curl -fsSL https://ollama.com/install.sh | sh
-mkdir -p "$OLLAMA_MODELS_DIR"
 
 # ==============================================================================
 # 2. A1111 Stable Diffusion WebUI
@@ -136,22 +100,24 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3"
+python_cmd="python3.11"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
-# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8)
-# A1111 runs this as: python -m {TORCH_COMMAND}, so it must be a valid module command
-export TORCH_COMMAND="pip --version"
+# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8).
+# NOTE: RTX 5090 ideally needs cu130+ for optimized CUDA ops, but RunPod's host
+# driver only supports CUDA 12.8 (version 12080), so cu130 will crash.
+# cu128 works but with reduced performance on Blackwell GPUs.
+export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
-# No xformers needed — avoids version mismatch with base image's torch build
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
+# No xformers needed — avoids version mismatch with base image's dev torch build
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
 EOF
 
-# ---- Pre-create venv inheriting system packages (torch 2.8.0+cu128 for Python 3.11) ----
+# ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3.11 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in A1111 venv..."
@@ -179,7 +145,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/7] Setting up ComfyUI + comfyui-ollama..."
+echo "[3/7] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -196,29 +162,10 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
     chmod +x /workspace/run_gpu.sh
 
-    # ---- Recreate ComfyUI venv with system-site-packages ----
-    # Inherit torch 2.8.0+cu128 from the base image (Python 3.11).
-    # This is the key step — without it ComfyUI only sees CPU.
-    echo "Recreating ComfyUI venv with system-site-packages (GPU-enabled torch)..."
-    rm -rf "$COMFYUI_DIR/venv"
-    python3 -m venv --system-site-packages "$COMFYUI_DIR/venv"
-
-    "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
-
-    # Install ComfyUI requirements — but keep the system torch stack
-    # (torch 2.8.0+cu128 with CUDA 12.8.1 / GPU support).
-    # pip's dependency resolver would otherwise pull a different torch build
-    # that may lack GPU support or be incompatible with the CUDA driver.
-    echo "Installing ComfyUI requirements (keeping system torch)..."
-    grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' "$COMFYUI_DIR/requirements.txt" \
-        > /tmp/comfyui_reqs_filtered.txt
-    "$COMFYUI_DIR/venv/bin/pip" install -r /tmp/comfyui_reqs_filtered.txt
-
     # Install custom nodes
     echo "Installing ComfyUI custom nodes..."
     git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
     git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
-    git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/stavsap/comfyui-ollama.git
 
     # Clean up ComfyUI installer artifacts
     rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
@@ -226,9 +173,14 @@ else
     echo "ComfyUI already exists, skipping installation."
 fi
 
-# Install comfyui-ollama Python dependencies
-echo "Installing comfyui-ollama dependencies..."
-"$COMFYUI_DIR/venv/bin/pip" install ollama==0.6.0 python-dotenv
+# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
+# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
+# compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
+# NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
+# driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
+# Once RunPod updates their drivers to CUDA 13.0+, switch this to cu130.
+echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # ==============================================================================
 # 4. Shared models directory
@@ -241,6 +193,10 @@ echo "========================================"
 mkdir -p "$MODELS_DIR"
 
 # --- ComfyUI: symlink ALL model subdirectories to the shared location ---
+# Dynamically discover every folder inside ComfyUI/models/ so nothing is missed
+# (checkpoints, clip, clip_vision, controlnet, diffusers, diffusion_models,
+#  embeddings, gligen, hypernetworks, loras, photomaker, style_models,
+#  unet, upscale_models, vae, vae_approx, …and any future additions).
 echo "Symlinking ComfyUI model directories to shared models..."
 for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
     # Skip if the glob matched nothing
@@ -259,6 +215,7 @@ for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
 done
 
 # --- A1111: symlink model directories to the same shared location ---
+# Map A1111 folder names → shared folder names (where they differ)
 echo "Symlinking A1111 model directories to shared models..."
 declare -A A1111_MAP=(
     ["Stable-diffusion"]="checkpoints"
@@ -300,6 +257,8 @@ ls -1 "$MODELS_DIR"
 echo "========================================"
 echo "[5/7] Setting up File Browser..."
 echo "========================================"
+
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 
 if [ ! -f "$FB_DB" ]; then
     filebrowser config init --database "$FB_DB"
