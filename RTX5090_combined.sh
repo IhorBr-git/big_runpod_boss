@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # -- Combined Installation & Start Script for RTX 5090 ---
-# Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
+# Base image: runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404
 #
 # This script installs and launches:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
@@ -10,14 +10,15 @@
 #   - File Browser                           (port 8080)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
-# Both A1111 and ComfyUI use the base image's torch 2.8.0 + CUDA 12.8.
-# The RunPod host driver natively supports RTX 5090; no cuda-compat layer
-# is needed (cuda-compat-13-0 actually breaks CUDA on RTX 5090 with
-# Error 804: "forward compatibility was attempted on non supported HW").
+# RTX 5090 optimizations:
+#   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
+#   - PyTorch 2.9.1+cu130 pre-installed in base image
+#   - Python 3.12 default; 3.9–3.13 all available
+#   - SDP attention (PyTorch native Flash Attention 2)
+#   - filebrowser, zstd, git, etc. already in base image
 #
 # On pod restart (both dirs already exist) the script skips installation
-# entirely and goes straight to starting services — same logic as the
-# individual container start commands.
+# entirely and goes straight to starting services.
 #
 # Container Start Command:
 #   bash -c '[ -d "/workspace/stable-diffusion-webui" ] && [ -d "/workspace/ComfyUI" ] && ((cd /workspace && /workspace/run_gpu.sh) & (cd /workspace/stable-diffusion-webui && bash webui.sh -f) & /start.sh) || (cd /workspace && wget https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh)'
@@ -31,7 +32,7 @@ FB_DB="/workspace/.filebrowser.db"
 OLLAMA_MODELS_DIR="/workspace/.ollama/models"
 
 # ------------------------------------------------------------------------------
-# start_services — launches all three processes and waits
+# start_services — launches all processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
     echo "========================================"
@@ -46,11 +47,6 @@ start_services() {
 
     # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
     trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
-
-    # Ensure File Browser binary is available (not persisted across pod restarts)
-    if ! command -v filebrowser &> /dev/null; then
-        curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-    fi
 
     # Ensure Ollama binary is available (not persisted across pod restarts)
     if ! command -v ollama &> /dev/null; then
@@ -75,7 +71,7 @@ start_services() {
     # Start ComfyUI
     /workspace/run_gpu.sh &
 
-    # Start File Browser
+    # Start File Browser (binary already in base image)
     filebrowser --database "$FB_DB" &
 
     # Keep the container alive as long as any service is running
@@ -93,16 +89,17 @@ if [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
 fi
 
 # ==============================================================================
-# 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
+# 1. System dependencies & Ollama server
 # ==============================================================================
 echo "========================================"
-echo "[1/8] Installing system dependencies & Ollama server..."
+echo "[1/7] Installing extra system dependencies & Ollama server..."
 echo "========================================"
+# Most deps are already in the base image (git, wget, curl, libgl1, zstd, etc.)
+# Only install what's missing:
 apt-get update && apt-get install -y --no-install-recommends \
-    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
+    google-perftools bc libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- Install Ollama server ----
 echo "Installing Ollama server..."
 curl -fsSL https://ollama.com/install.sh | sh
 mkdir -p "$OLLAMA_MODELS_DIR"
@@ -111,7 +108,7 @@ mkdir -p "$OLLAMA_MODELS_DIR"
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/8] Setting up A1111 WebUI..."
+echo "[2/7] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -127,22 +124,21 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3.11"
+python_cmd="python3.12"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
-# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8).
-# The RunPod host driver natively supports RTX 5090 (Blackwell).
+# Skip torch install — already provided by the base image (torch 2.9.1 + CUDA 13.0)
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
-# No xformers needed — avoids version mismatch with base image's dev torch build
+# No xformers needed — avoids version mismatch with base image's torch build
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
 EOF
 
-# ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
+# ---- Pre-create venv inheriting base image packages (torch 2.9.1+cu130) ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.11 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3.12 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in A1111 venv..."
@@ -170,7 +166,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/8] Setting up ComfyUI + comfyui-ollama..."
+echo "[3/7] Setting up ComfyUI + comfyui-ollama..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -188,11 +184,10 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     chmod +x /workspace/run_gpu.sh
 
     # ---- Recreate ComfyUI venv with system-site-packages ----
-    # Inherit the base image's torch 2.8.0 + CUDA 12.8 (same as A1111).
-    # The RunPod host driver natively supports RTX 5090; no cuda-compat needed.
+    # Inherit the base image's torch 2.9.1+cu130 (native CUDA 13.0 / Blackwell).
     echo "Recreating ComfyUI venv with system-site-packages (torch from base image)..."
     rm -rf "$COMFYUI_DIR/venv"
-    python3.11 -m venv --system-site-packages "$COMFYUI_DIR/venv"
+    python3.12 -m venv --system-site-packages "$COMFYUI_DIR/venv"
 
     "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
     echo "Installing ComfyUI requirements..."
@@ -218,7 +213,7 @@ echo "Installing comfyui-ollama dependencies..."
 # 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/8] Setting up shared models directory..."
+echo "[4/7] Setting up shared models directory..."
 echo "========================================"
 
 # Create shared models root
@@ -287,11 +282,10 @@ ls -1 "$MODELS_DIR"
 # 5. File Browser (web-based file manager on port 8080)
 # ==============================================================================
 echo "========================================"
-echo "[5/8] Setting up File Browser..."
+echo "[5/7] Setting up File Browser..."
 echo "========================================"
 
-curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-
+# filebrowser binary is already in the base image — just configure the database
 if [ ! -f "$FB_DB" ]; then
     filebrowser config init --database "$FB_DB"
     filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
@@ -302,7 +296,7 @@ fi
 # 6. Cleanup
 # ==============================================================================
 echo "========================================"
-echo "[6/8] Cleaning up..."
+echo "[6/7] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 
