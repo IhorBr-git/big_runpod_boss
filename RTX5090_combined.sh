@@ -1,21 +1,24 @@
 #!/bin/bash
 
 # -- Combined Installation & Start Script for RTX 5090 ---
-# Base image: runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404
+# Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 #
 # This script installs and launches:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
 #   - Ollama server (for comfyui-ollama)    (port 11434)
 #   - File Browser                           (port 8080)
-# on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
+# on a single RunPod pod optimized for RTX 5090.
 #
-# RTX 5090 optimizations:
-#   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
-#   - PyTorch 2.9.1+cu130 (installed for Python 3.13 at startup)
-#   - Python 3.13 used for all venvs
+# Setup:
+#   - CUDA 12.8.1 with cuDNN — RTX 5090 supported via forward-compatible PTX
+#   - PyTorch 2.8.0+cu128 from base image (pre-installed for Python 3.11)
+#   - Python 3.11 for both A1111 and ComfyUI (single version, no conflicts)
 #   - SDP attention (PyTorch native Flash Attention 2)
-#   - filebrowser, zstd, git, etc. already in base image
+#
+# The critical step for GPU detection in ComfyUI is recreating its venv with
+# --system-site-packages so it inherits the base image's CUDA-enabled PyTorch.
+# Without this, pip may install a CPU-only torch and ComfyUI only sees CPU.
 #
 # On pod restart (both dirs already exist) the script skips installation
 # entirely and goes straight to starting services.
@@ -53,6 +56,11 @@ start_services() {
         curl -fsSL https://ollama.com/install.sh | sh
     fi
 
+    # Ensure filebrowser binary is available (not persisted across pod restarts)
+    if ! command -v filebrowser &> /dev/null; then
+        curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+    fi
+
     # Store Ollama models in /workspace so they persist across pod restarts
     export OLLAMA_MODELS="$OLLAMA_MODELS_DIR"
 
@@ -71,7 +79,7 @@ start_services() {
     # Start ComfyUI
     /workspace/run_gpu.sh &
 
-    # Start File Browser (binary already in base image)
+    # Start File Browser
     filebrowser --database "$FB_DB" &
 
     # Keep the container alive as long as any service is running
@@ -92,20 +100,17 @@ fi
 # 1. System dependencies & Ollama server
 # ==============================================================================
 echo "========================================"
-echo "[1/7] Installing extra system dependencies, Python 3.13 torch & Ollama..."
+echo "[1/7] Installing extra system dependencies & Ollama..."
 echo "========================================"
-# Most deps are already in the base image (git, wget, curl, libgl1, zstd, etc.)
-# python3.13-venv is needed to create venvs with Python 3.13
 apt-get update && apt-get install -y --no-install-recommends \
-    google-perftools bc libglib2.0-0 python3.13-venv \
+    google-perftools bc libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# The base image ships torch for the default Python 3.12; we need it for 3.13
-# so that --system-site-packages venvs inherit the correct torch build.
-echo "Installing PyTorch 2.9.1+cu130 for Python 3.13..."
-python3.13 -m pip install --no-cache-dir \
-    torch==2.9.1 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu130
+# Install filebrowser if not present in base image
+if ! command -v filebrowser &> /dev/null; then
+    echo "Installing filebrowser..."
+    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+fi
 
 echo "Installing Ollama server..."
 curl -fsSL https://ollama.com/install.sh | sh
@@ -131,11 +136,11 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3.13"
+python_cmd="python3"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
-# Skip torch install — already provided by the base image (torch 2.9.1 + CUDA 13.0)
+# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8)
 # A1111 runs this as: python -m {TORCH_COMMAND}, so it must be a valid module command
 export TORCH_COMMAND="pip --version"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
@@ -143,10 +148,10 @@ export TORCH_COMMAND="pip --version"
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
 EOF
 
-# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.13) ----
+# ---- Pre-create venv inheriting system packages (torch 2.8.0+cu128 for Python 3.11) ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.13 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in A1111 venv..."
@@ -192,17 +197,18 @@ if [ ! -d "$COMFYUI_DIR" ]; then
     chmod +x /workspace/run_gpu.sh
 
     # ---- Recreate ComfyUI venv with system-site-packages ----
-    # Inherit torch 2.9.1+cu130 installed for Python 3.13 (native CUDA 13.0 / Blackwell).
-    echo "Recreating ComfyUI venv with system-site-packages (torch for Python 3.13)..."
+    # Inherit torch 2.8.0+cu128 from the base image (Python 3.11).
+    # This is the key step — without it ComfyUI only sees CPU.
+    echo "Recreating ComfyUI venv with system-site-packages (GPU-enabled torch)..."
     rm -rf "$COMFYUI_DIR/venv"
-    python3.13 -m venv --system-site-packages "$COMFYUI_DIR/venv"
+    python3 -m venv --system-site-packages "$COMFYUI_DIR/venv"
 
     "$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
 
     # Install ComfyUI requirements — but keep the system torch stack
-    # (torch 2.9.1+cu130 for Python 3.13 with native CUDA 13.0 / Blackwell support).
-    # pip's dependency resolver would otherwise pull torch 2.10+cu12 via torchvision,
-    # which lacks Blackwell support and causes CUDA Error 804 at runtime.
+    # (torch 2.8.0+cu128 with CUDA 12.8.1 / GPU support).
+    # pip's dependency resolver would otherwise pull a different torch build
+    # that may lack GPU support or be incompatible with the CUDA driver.
     echo "Installing ComfyUI requirements (keeping system torch)..."
     grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' "$COMFYUI_DIR/requirements.txt" \
         > /tmp/comfyui_reqs_filtered.txt
@@ -235,10 +241,6 @@ echo "========================================"
 mkdir -p "$MODELS_DIR"
 
 # --- ComfyUI: symlink ALL model subdirectories to the shared location ---
-# Dynamically discover every folder inside ComfyUI/models/ so nothing is missed
-# (checkpoints, clip, clip_vision, controlnet, diffusers, diffusion_models,
-#  embeddings, gligen, hypernetworks, loras, photomaker, style_models,
-#  unet, upscale_models, vae, vae_approx, …and any future additions).
 echo "Symlinking ComfyUI model directories to shared models..."
 for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
     # Skip if the glob matched nothing
@@ -257,7 +259,6 @@ for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
 done
 
 # --- A1111: symlink model directories to the same shared location ---
-# Map A1111 folder names → shared folder names (where they differ)
 echo "Symlinking A1111 model directories to shared models..."
 declare -A A1111_MAP=(
     ["Stable-diffusion"]="checkpoints"
@@ -300,7 +301,6 @@ echo "========================================"
 echo "[5/7] Setting up File Browser..."
 echo "========================================"
 
-# filebrowser binary is already in the base image — just configure the database
 if [ ! -f "$FB_DB" ]; then
     filebrowser config init --database "$FB_DB"
     filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"

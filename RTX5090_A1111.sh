@@ -1,38 +1,33 @@
 #!/bin/bash
 
 # -- Installation & Start Script for A1111 on RTX 5090 ---
-# Base image: runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404
+# Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 #
 # This script installs and launches AUTOMATIC1111 Stable Diffusion WebUI
-# on RunPod optimized for RTX 5090 (Blackwell architecture).
+# on RunPod optimized for RTX 5090.
 #
-# RTX 5090 optimizations:
-#   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
-#   - PyTorch 2.9.1+cu130 (installed for Python 3.13 at startup)
-#   - Python 3.13 venv with --system-site-packages (inherits torch)
+# Setup:
+#   - CUDA 12.8.1 with cuDNN — RTX 5090 supported via forward-compatible PTX
+#   - PyTorch 2.8.0+cu128 from base image (pre-installed for Python 3.11)
+#   - Python 3.11 venv with --system-site-packages (inherits GPU-enabled torch)
 #   - SDP attention (PyTorch native Flash Attention 2) — no xformers needed
 #   - CLIP installed with --no-deps to prevent torch version conflicts
-#   - filebrowser, git, etc. already in base image
 
 set -e
 
 WEBUI_DIR="/workspace/stable-diffusion-webui"
 
 # ---- Install extra system dependencies ----
-# Most deps are already in the base image (git, wget, curl, libgl1, zstd, etc.)
-# python3.13-venv is needed to create venvs with Python 3.13
 echo "Installing extra system dependencies..."
 apt-get update && apt-get install -y --no-install-recommends \
-    google-perftools bc libglib2.0-0 python3.13-venv \
+    google-perftools bc libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- Install PyTorch 2.9.1+cu130 for Python 3.13 ----
-# The base image ships torch for the default Python 3.12; we need it for 3.13
-# so that --system-site-packages venvs inherit the correct torch build.
-echo "Installing PyTorch 2.9.1+cu130 for Python 3.13..."
-python3.13 -m pip install --no-cache-dir \
-    torch==2.9.1 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu130
+# ---- Install filebrowser if not present ----
+if ! command -v filebrowser &> /dev/null; then
+    echo "Installing filebrowser..."
+    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+fi
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
 if [ ! -d "$WEBUI_DIR" ]; then
@@ -47,22 +42,21 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3.13"
+python_cmd="python3"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
-# Skip torch install — already provided by the base image (torch 2.9.1 + CUDA 13.0)
-# A1111 runs this as: python -m {TORCH_COMMAND}, so it must be a valid module command
+# Skip torch install — already provided by the base image (torch 2.8.0 + CUDA 12.8)
 export TORCH_COMMAND="pip --version"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's torch build
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
 EOF
 
-# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.13) ----
+# ---- Pre-create venv inheriting system packages (torch 2.8.0+cu128 for Python 3.11) ----
 echo "Setting up Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.13 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in venv..."
@@ -86,7 +80,7 @@ echo "Installing extensions..."
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
     git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
 
-# ---- File Browser (already in base image — just configure) ----
+# ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"
 if [ ! -f "$FB_DB" ]; then
     echo "Configuring File Browser..."

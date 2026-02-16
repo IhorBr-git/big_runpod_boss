@@ -1,30 +1,27 @@
 #!/bin/bash
 
 # -- Installation Script for ComfyUI on RTX 5090 ---
-# Base image: runpod/pytorch:1.0.3-cu1300-torch291-ubuntu2404
+# Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04
 #
 # This script handles the full installation of ComfyUI,
 # comfyui-model-downloader, comfyui-ollama, Ollama LLM server, and File Browser.
 #
-# RTX 5090 optimizations:
-#   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
-#   - PyTorch 2.9.1+cu130 (installed for Python 3.13 at startup)
-#   - Python 3.13 venv with --system-site-packages (inherits torch)
-#   - filebrowser, zstd, git, etc. already in base image
+# Setup:
+#   - CUDA 12.8.1 with cuDNN — RTX 5090 supported via forward-compatible PTX
+#   - PyTorch 2.8.0+cu128 from base image (pre-installed for Python 3.11)
+#   - Python 3.11 venv with --system-site-packages (inherits GPU-enabled torch)
+#
+# The critical step for GPU detection is recreating the ComfyUI venv with
+# --system-site-packages so it inherits the base image's CUDA-enabled PyTorch.
+# Without this, pip may install a CPU-only torch and ComfyUI only sees CPU.
 
 cd /workspace
 
-# ---- Install Python 3.13 venv support + PyTorch for 3.13 ----
-echo "Installing Python 3.13 venv support..."
-apt-get update && apt-get install -y --no-install-recommends python3.13-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-# The base image ships torch for the default Python 3.12; we need it for 3.13
-# so that --system-site-packages venvs inherit the correct torch build.
-echo "Installing PyTorch 2.9.1+cu130 for Python 3.13..."
-python3.13 -m pip install --no-cache-dir \
-    torch==2.9.1 torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu130
+# ---- Install filebrowser if not present ----
+if ! command -v filebrowser &> /dev/null; then
+    echo "Installing filebrowser..."
+    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+fi
 
 # Download and install ComfyUI using the ComfyUI-Manager script.
 echo "Installing ComfyUI and ComfyUI Manager..."
@@ -38,17 +35,18 @@ sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
 chmod +x /workspace/run_gpu.sh
 
 # ---- Recreate ComfyUI venv with system-site-packages ----
-# Inherit torch 2.9.1+cu130 installed for Python 3.13 (native CUDA 13.0 / Blackwell).
-echo "Recreating ComfyUI venv with system-site-packages (torch for Python 3.13)..."
+# Inherit torch 2.8.0+cu128 from the base image (Python 3.11).
+# This is the key step that makes ComfyUI see the GPU instead of CPU-only.
+echo "Recreating ComfyUI venv with system-site-packages (GPU-enabled torch)..."
 rm -rf /workspace/ComfyUI/venv
-python3.13 -m venv --system-site-packages /workspace/ComfyUI/venv
+python3 -m venv --system-site-packages /workspace/ComfyUI/venv
 
 /workspace/ComfyUI/venv/bin/pip install --upgrade pip wheel
 
 # Install ComfyUI requirements — but keep the system torch stack
-# (torch 2.9.1+cu130 for Python 3.13 with native CUDA 13.0 / Blackwell support).
-# pip's dependency resolver would otherwise pull torch 2.10+cu12 via torchvision,
-# which lacks Blackwell support and causes CUDA Error 804 at runtime.
+# (torch 2.8.0+cu128 with CUDA 12.8.1 / GPU support).
+# pip's dependency resolver would otherwise pull a different torch build
+# that may lack GPU support or be incompatible with the CUDA driver.
 echo "Installing ComfyUI requirements (keeping system torch)..."
 grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' /workspace/ComfyUI/requirements.txt \
     > /tmp/comfyui_reqs_filtered.txt
@@ -61,7 +59,7 @@ git -C /workspace/ComfyUI/custom_nodes clone https://github.com/MadiatorLabs/Com
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/stavsap/comfyui-ollama.git
 /workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-ollama/requirements.txt
 
-# ---- File Browser (already in base image — just configure) ----
+# ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"
 if [ ! -f "$FB_DB" ]; then
     echo "Configuring File Browser..."
@@ -74,7 +72,7 @@ fi
 echo "Installing Ollama..."
 curl -fsSL https://ollama.com/install.sh | sh
 
-# Clean up the installation scripts.
+# Clean up
 echo "Cleaning up..."
 rm -f install_script.sh run_cpu.sh install-comfyui-venv-linux.sh
 
