@@ -8,15 +8,11 @@
 #
 # RTX 5090 optimizations:
 #   - CUDA 13.0 native — full Blackwell (sm_120) kernel support
-#   - PyTorch 2.9.1+cu130 from base image (already installed for Python 3.12)
-#   - Python 3.12 venv with --system-site-packages (inherits torch)
+#   - PyTorch 2.9.1+cu130 (installed for Python 3.13 at startup)
+#   - Python 3.13 venv with --system-site-packages (inherits torch)
 #   - SDP attention (PyTorch native Flash Attention 2) — no xformers needed
 #   - CLIP installed with --no-deps to prevent torch version conflicts
 #   - filebrowser, git, etc. already in base image
-#
-# NOTE: A1111 uses Python 3.12 (the base image default) because many pinned
-# dependencies (Pillow 9.5.0, etc.) lack Python 3.13 wheels and fail to build
-# from source.  Python 3.12 works out of the box with no dependency patches.
 
 set -e
 
@@ -24,12 +20,19 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 
 # ---- Install extra system dependencies ----
 # Most deps are already in the base image (git, wget, curl, libgl1, zstd, etc.)
-# Python 3.12 is the default in the base image — torch 2.9.1+cu130 is already
-# installed for it, so no separate torch install is needed.
+# python3.13-venv is needed to create venvs with Python 3.13
 echo "Installing extra system dependencies..."
 apt-get update && apt-get install -y --no-install-recommends \
-    google-perftools bc libglib2.0-0 \
+    google-perftools bc libglib2.0-0 python3.13-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# ---- Install PyTorch 2.9.1+cu130 for Python 3.13 ----
+# The base image ships torch for the default Python 3.12; we need it for 3.13
+# so that --system-site-packages venvs inherit the correct torch build.
+echo "Installing PyTorch 2.9.1+cu130 for Python 3.13..."
+python3.13 -m pip install --no-cache-dir \
+    torch==2.9.1 torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu130
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
 if [ ! -d "$WEBUI_DIR" ]; then
@@ -44,7 +47,7 @@ fi
 echo "Configuring webui-user.sh..."
 cat > "$WEBUI_DIR/webui-user.sh" << 'EOF'
 #!/bin/bash
-python_cmd="python3.12"
+python_cmd="python3.13"
 venv_dir="venv"
 # Stability-AI repos were made private (Dec 2025) — use community mirrors
 export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
@@ -56,10 +59,10 @@ export TORCH_COMMAND="pip --version"
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check"
 EOF
 
-# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.12) ----
+# ---- Pre-create venv inheriting system packages (torch 2.9.1+cu130 for Python 3.13) ----
 echo "Setting up Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.12 -m venv --system-site-packages "$WEBUI_DIR/venv"
+    python3.13 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in venv..."
