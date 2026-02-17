@@ -70,7 +70,10 @@ start_services() {
     filebrowser --database "$FB_DB" &
 
     # Start Ollama server (used by comfyui-ollama node)
-    OLLAMA_HOST=0.0.0.0:11434 ollama serve &
+    # Force CPU-only mode: ComfyUI's diffusion models (Flux, CLIP, VAE, ControlNet)
+    # consume most of the 32 GB VRAM, leaving too little for Ollama's LLM on GPU.
+    # CPU inference is fast enough for text-prompt generation and avoids OOM crashes.
+    OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
 
     # Keep the container alive as long as any service is running
     wait

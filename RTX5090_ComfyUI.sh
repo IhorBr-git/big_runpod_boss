@@ -78,4 +78,5 @@ rm -f install_script.sh run_cpu.sh install-comfyui-venv-linux.sh
 
 # Start the main Runpod service, ComfyUI, Ollama, and File Browser in the background.
 echo "Starting ComfyUI, Ollama, File Browser, and Runpod services..."
-(/start.sh & ollama serve & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
+# Force Ollama to CPU-only (OLLAMA_NUM_GPU=0) to avoid VRAM conflicts with ComfyUI models
+(/start.sh & OLLAMA_NUM_GPU=0 ollama serve & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
