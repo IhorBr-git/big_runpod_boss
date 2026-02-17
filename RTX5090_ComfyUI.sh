@@ -17,6 +17,9 @@
 
 cd /workspace
 
+# Persist Ollama models on the workspace volume (survives pod restarts)
+export OLLAMA_MODELS="/workspace/.ollama/models"
+
 # ---- Install filebrowser if not present ----
 if ! command -v filebrowser &> /dev/null; then
     echo "Installing filebrowser..."
@@ -69,8 +72,18 @@ if [ ! -f "$FB_DB" ]; then
 fi
 
 # ---- Install Ollama LLM server (used by comfyui-ollama extension) ----
-echo "Installing Ollama..."
+echo "Installing Ollama & pulling qwen3-vl:4b model..."
 curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
+# Start serve temporarily, pull the model, then stop.
+OLLAMA_NUM_GPU=0 ollama serve &
+OLLAMA_TMP_PID=$!
+sleep 3
+echo "Pulling qwen3-vl:4b model..."
+ollama pull qwen3-vl:4b
+kill $OLLAMA_TMP_PID 2>/dev/null
+wait $OLLAMA_TMP_PID 2>/dev/null || true
 
 # Clean up
 echo "Cleaning up..."
