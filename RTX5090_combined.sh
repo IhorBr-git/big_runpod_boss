@@ -46,6 +46,11 @@ start_services() {
         curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
     fi
 
+    # Ensure zstd is available (required by Ollama installer, not persisted across restarts)
+    if ! command -v zstd &> /dev/null; then
+        apt-get update && apt-get install -y --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*
+    fi
+
     # Ensure Ollama is installed (binary is not persisted across pod restarts)
     if ! command -v ollama &> /dev/null; then
         echo "Installing Ollama..."
@@ -88,7 +93,7 @@ echo "========================================"
 echo "[1/8] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
