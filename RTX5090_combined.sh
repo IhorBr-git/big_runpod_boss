@@ -7,14 +7,15 @@
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
 #   - File Browser                           (port 8080)
+#   - Ollama                                 (port 11434)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
 # On pod restart (both dirs already exist) the script skips installation
 # entirely and goes straight to starting services — same logic as the
 # individual container start commands.
 #
-# Container Start Command:
-#   bash -c '[ -d "/workspace/stable-diffusion-webui" ] && [ -d "/workspace/ComfyUI" ] && ((cd /workspace && /workspace/run_gpu.sh) & (cd /workspace/stable-diffusion-webui && bash webui.sh -f) & /start.sh) || (cd /workspace && wget https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh)'
+# Container Start Command (use the script for both fresh install and restart):
+#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
 
 set -e
 
@@ -34,6 +35,7 @@ start_services() {
     echo "  - A1111 WebUI     (port 3000)"
     echo "  - ComfyUI         (port 8188)"
     echo "  - File Browser    (port 8080)"
+    echo "  - Ollama          (port 11434)"
     echo "========================================"
 
     # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
@@ -42,6 +44,12 @@ start_services() {
     # Ensure File Browser binary is available (not persisted across pod restarts)
     if ! command -v filebrowser &> /dev/null; then
         curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+    fi
+
+    # Ensure Ollama is installed (binary is not persisted across pod restarts)
+    if ! command -v ollama &> /dev/null; then
+        echo "Installing Ollama..."
+        curl -fsSL https://ollama.com/install.sh | sh
     fi
 
     # Start RunPod handler (only once for both services)
@@ -55,6 +63,9 @@ start_services() {
 
     # Start File Browser
     filebrowser --database "$FB_DB" &
+
+    # Start Ollama server (used by comfyui-ollama node)
+    OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 
     # Keep the container alive as long as any service is running
     wait
@@ -74,7 +85,7 @@ fi
 # 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/7] Installing system dependencies..."
+echo "[1/8] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
@@ -84,7 +95,7 @@ apt-get update && apt-get install -y --no-install-recommends \
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/7] Setting up A1111 WebUI..."
+echo "[2/8] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -145,7 +156,7 @@ echo "Installing A1111 extensions..."
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/7] Setting up ComfyUI..."
+echo "[3/8] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -186,7 +197,7 @@ echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility...
 # 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/7] Setting up shared models directory..."
+echo "[4/8] Setting up shared models directory..."
 echo "========================================"
 
 # Create shared models root
@@ -255,7 +266,7 @@ ls -1 "$MODELS_DIR"
 # 5. File Browser (web-based file manager on port 8080)
 # ==============================================================================
 echo "========================================"
-echo "[5/7] Setting up File Browser..."
+echo "[5/8] Setting up File Browser..."
 echo "========================================"
 
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
@@ -267,14 +278,22 @@ if [ ! -f "$FB_DB" ]; then
 fi
 
 # ==============================================================================
-# 6. Cleanup
+# 6. Ollama (LLM inference server for comfyui-ollama)
 # ==============================================================================
 echo "========================================"
-echo "[6/7] Cleaning up..."
+echo "[6/8] Installing Ollama..."
+echo "========================================"
+curl -fsSL https://ollama.com/install.sh | sh
+
+# ==============================================================================
+# 7. Cleanup
+# ==============================================================================
+echo "========================================"
+echo "[7/8] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 
 # ==============================================================================
-# 7. Start all services
+# 8. Start all services
 # ==============================================================================
 start_services
