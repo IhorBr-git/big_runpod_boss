@@ -64,17 +64,19 @@ fi
 
 # Disable A1111 auto-loading checkpoint at startup (saves ~8 GB VRAM for ComfyUI).
 # User can still select a model manually from the A1111 dropdown.
-A1111_CONFIG="$WEBUI_DIR/config.json"
-if [ ! -f "$A1111_CONFIG" ]; then
-echo '{"sd_checkpoint_autoload": false}' > "$A1111_CONFIG"
-else
-python3 -c "
+python3 - "$WEBUI_DIR/config.json" << 'PYEOF'
 import json, sys
-cfg = json.load(open(sys.argv[1]))
-cfg['sd_checkpoint_autoload'] = False
-json.dump(cfg, open(sys.argv[1], 'w'), indent=4)
-" "$A1111_CONFIG"
-fi
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    cfg = {}
+cfg["sd_checkpoint_autoload"] = False
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=4)
+print(f"A1111 config: sd_checkpoint_autoload=false in {path}")
+PYEOF
 
 # Start RunPod handler (only once for both services)
 /start.sh &
