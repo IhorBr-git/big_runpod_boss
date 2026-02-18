@@ -290,7 +290,6 @@ fi
 # 6. Ollama (LLM inference server for comfyui-ollama)
 # ==============================================================================
 echo "========================================"
-echo "[6/8] Installing Ollama..."
 echo "[6/8] Installing Ollama & pulling qwen3-vl:4b model..."
 echo "========================================"
 curl -fsSL https://ollama.com/install.sh | sh
