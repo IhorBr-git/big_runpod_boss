@@ -140,6 +140,19 @@ export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
 EOF
 
+# ---- Disable auto-loading checkpoint at startup (saves ~8 GB VRAM for ComfyUI) ----
+A1111_CONFIG="$WEBUI_DIR/config.json"
+if [ ! -f "$A1111_CONFIG" ]; then
+echo '{"sd_checkpoint_autoload": false}' > "$A1111_CONFIG"
+elif ! grep -q '"sd_checkpoint_autoload"' "$A1111_CONFIG"; then
+python3 -c "
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+cfg['sd_checkpoint_autoload'] = False
+json.dump(cfg, open(sys.argv[1], 'w'), indent=4)
+" "$A1111_CONFIG"
+fi
+
 # ---- Pre-create venv inheriting base image packages (torch 2.4.0, torchvision, CUDA 12.4) ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
