@@ -23,6 +23,8 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+# Persist Ollama models on the workspace volume (survives pod restarts)
+export OLLAMA_MODELS="/workspace/.ollama/models"
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
@@ -46,10 +48,10 @@ if ! command -v filebrowser &> /dev/null; then
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 fi
 
-    # Ensure zstd is available (required by Ollama installer, not persisted across restarts)
-    if ! command -v zstd &> /dev/null; then
-        apt-get update && apt-get install -y --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*
-    fi
+# Ensure zstd is available (required by Ollama installer, not persisted across restarts)
+if ! command -v zstd &> /dev/null; then
+apt-get update && apt-get install -y --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*
+fi
 
 # Ensure Ollama is installed (binary is not persisted across pod restarts)
 if ! command -v ollama &> /dev/null; then
@@ -70,7 +72,15 @@ fi
 filebrowser --database "$FB_DB" &
 
 # Start Ollama server (used by comfyui-ollama node)
-OLLAMA_HOST=0.0.0.0:11434 ollama serve &
+# Force CPU-only mode: ComfyUI's diffusion models (Flux, CLIP, VAE, ControlNet)
+# consume most of the 32 GB VRAM, leaving too little for Ollama's LLM on GPU.
+# CPU inference is fast enough for text-prompt generation and avoids OOM crashes.
+OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
+
+    # Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
+    echo "Ensuring Ollama model qwen3-vl:4b is available..."
+    sleep 3  # wait for Ollama server to be ready
+    OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
 
 # Keep the container alive as long as any service is running
 wait
@@ -93,8 +103,7 @@ echo "========================================"
 echo "[1/8] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
-    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
+wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
 && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
@@ -288,8 +297,19 @@ fi
 # ==============================================================================
 echo "========================================"
 echo "[6/8] Installing Ollama..."
+echo "[6/8] Installing Ollama & pulling qwen3-vl:4b model..."
 echo "========================================"
 curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
+# Start serve temporarily, pull the model, then stop.
+OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
+OLLAMA_TMP_PID=$!
+sleep 3
+echo "Pulling qwen3-vl:4b model..."
+OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b
+kill $OLLAMA_TMP_PID 2>/dev/null
+wait $OLLAMA_TMP_PID 2>/dev/null || true
 
 # ==============================================================================
 # 7. Cleanup
