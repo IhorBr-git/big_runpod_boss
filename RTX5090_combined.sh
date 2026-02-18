@@ -57,6 +57,10 @@ fi
 if ! command -v ollama &> /dev/null; then
 echo "Installing Ollama..."
 curl -fsSL https://ollama.com/install.sh | sh
+# The install script creates a systemd service that runs ollama with GPU enabled.
+# Stop and disable it — we start our own CPU-only instance below.
+systemctl disable ollama 2>/dev/null || true
+systemctl stop ollama 2>/dev/null || true
 fi
 
 # Start RunPod handler (only once for both services)
@@ -299,6 +303,11 @@ echo "========================================"
 echo "[6/8] Installing Ollama & pulling qwen3-vl:4b model..."
 echo "========================================"
 curl -fsSL https://ollama.com/install.sh | sh
+
+# The install script creates a systemd service that runs ollama with GPU enabled.
+# Stop and disable it — we start our own CPU-only instance below.
+systemctl disable ollama 2>/dev/null || true
+systemctl stop ollama 2>/dev/null || true
 
 # Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
 # Start serve temporarily, pull the model, then stop.

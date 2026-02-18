@@ -75,6 +75,11 @@ fi
 echo "Installing Ollama & pulling qwen3-vl:4b model..."
 curl -fsSL https://ollama.com/install.sh | sh
 
+# The install script creates a systemd service that runs ollama with GPU enabled.
+# Stop and disable it — we start our own CPU-only instance below.
+systemctl disable ollama 2>/dev/null || true
+systemctl stop ollama 2>/dev/null || true
+
 # Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
 # Start serve temporarily, pull the model, then stop.
 OLLAMA_NUM_GPU=0 ollama serve &
