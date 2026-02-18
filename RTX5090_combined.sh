@@ -23,77 +23,67 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
-# Persist Ollama models on the workspace volume (survives pod restarts)
-export OLLAMA_MODELS="/workspace/.ollama/models"
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
-    echo "========================================"
-    echo "Starting services..."
-    echo "========================================"
-    echo "  - RunPod handler  (/start.sh)"
-    echo "  - A1111 WebUI     (port 3000)"
-    echo "  - ComfyUI         (port 8188)"
-    echo "  - File Browser    (port 8080)"
-    echo "  - Ollama          (port 11434)"
-    echo "========================================"
+echo "========================================"
+echo "Starting services..."
+echo "========================================"
+echo "  - RunPod handler  (/start.sh)"
+echo "  - A1111 WebUI     (port 3000)"
+echo "  - ComfyUI         (port 8188)"
+echo "  - File Browser    (port 8080)"
+echo "  - Ollama          (port 11434)"
+echo "========================================"
 
-    # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
-    trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
+# Forward SIGTERM/SIGINT to all child processes for clean container shutdown
+trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
 
-    # Ensure File Browser binary is available (not persisted across pod restarts)
-    if ! command -v filebrowser &> /dev/null; then
-        curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-    fi
+# Ensure File Browser binary is available (not persisted across pod restarts)
+if ! command -v filebrowser &> /dev/null; then
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+fi
 
     # Ensure zstd is available (required by Ollama installer, not persisted across restarts)
     if ! command -v zstd &> /dev/null; then
         apt-get update && apt-get install -y --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*
     fi
 
-    # Ensure Ollama is installed (binary is not persisted across pod restarts)
-    if ! command -v ollama &> /dev/null; then
-        echo "Installing Ollama..."
-        curl -fsSL https://ollama.com/install.sh | sh
-    fi
+# Ensure Ollama is installed (binary is not persisted across pod restarts)
+if ! command -v ollama &> /dev/null; then
+echo "Installing Ollama..."
+curl -fsSL https://ollama.com/install.sh | sh
+fi
 
-    # Start RunPod handler (only once for both services)
-    /start.sh &
+# Start RunPod handler (only once for both services)
+/start.sh &
 
-    # Start A1111 WebUI
-    (cd "$WEBUI_DIR" && bash webui.sh -f) &
+# Start A1111 WebUI
+(cd "$WEBUI_DIR" && bash webui.sh -f) &
 
-    # Start ComfyUI
-    /workspace/run_gpu.sh &
+# Start ComfyUI
+/workspace/run_gpu.sh &
 
-    # Start File Browser
-    filebrowser --database "$FB_DB" &
+# Start File Browser
+filebrowser --database "$FB_DB" &
 
-    # Start Ollama server (used by comfyui-ollama node)
-    # Force CPU-only mode: ComfyUI's diffusion models (Flux, CLIP, VAE, ControlNet)
-    # consume most of the 32 GB VRAM, leaving too little for Ollama's LLM on GPU.
-    # CPU inference is fast enough for text-prompt generation and avoids OOM crashes.
-    OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
+# Start Ollama server (used by comfyui-ollama node)
+OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 
-    # Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
-    echo "Ensuring Ollama model qwen3-vl:4b is available..."
-    sleep 3  # wait for Ollama server to be ready
-    OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
-
-    # Keep the container alive as long as any service is running
-    wait
+# Keep the container alive as long as any service is running
+wait
 }
 
 # ==============================================================================
 # Fast restart: if both are already installed, skip straight to startup
 # ==============================================================================
 if [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
-    echo "Both A1111 and ComfyUI already installed. Skipping installation..."
-    rm -f /workspace/install_script.sh
-    start_services
-    exit 0
+echo "Both A1111 and ComfyUI already installed. Skipping installation..."
+rm -f /workspace/install_script.sh
+start_services
+exit 0
 fi
 
 # ==============================================================================
@@ -103,8 +93,9 @@ echo "========================================"
 echo "[1/8] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
+    wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
     wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
-    && rm -rf /var/lib/apt/lists/*
+&& rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
 # 2. A1111 Stable Diffusion WebUI
@@ -115,11 +106,11 @@ echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
 if [ ! -d "$WEBUI_DIR" ]; then
-    echo "Cloning AUTOMATIC1111 Stable Diffusion WebUI..."
-    git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git "$WEBUI_DIR"
+echo "Cloning AUTOMATIC1111 Stable Diffusion WebUI..."
+git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui.git "$WEBUI_DIR"
 else
-    echo "WebUI already exists, pulling latest changes..."
-    cd "$WEBUI_DIR" && git pull
+echo "WebUI already exists, pulling latest changes..."
+cd "$WEBUI_DIR" && git pull
 fi
 
 # ---- Configure webui-user.sh ----
@@ -143,7 +134,7 @@ EOF
 # ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
 echo "Setting up A1111 Python venv..."
 if [ ! -d "$WEBUI_DIR/venv" ]; then
-    python3.11 -m venv --system-site-packages "$WEBUI_DIR/venv"
+python3.11 -m venv --system-site-packages "$WEBUI_DIR/venv"
 fi
 
 echo "Installing build dependencies in A1111 venv..."
@@ -154,18 +145,18 @@ echo "Installing build dependencies in A1111 venv..."
 # ---- Pre-install CLIP without dependencies (torch is already in base image) ----
 echo "Pre-installing CLIP..."
 "$WEBUI_DIR/venv/bin/pip" install --no-build-isolation --no-deps \
-    https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
+https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.zip
 # Install only CLIP's lightweight dependencies (not torch)
 "$WEBUI_DIR/venv/bin/pip" install ftfy regex tqdm
 
 # ---- Install extensions (only if not already present) ----
 echo "Installing A1111 extensions..."
 [ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
-    git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
+git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
 [ ! -d "$WEBUI_DIR/extensions/aspect-ratio-helper" ] && \
-    git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
+git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
-    git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
+git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
 
 # ==============================================================================
 # 3. ComfyUI
@@ -175,28 +166,28 @@ echo "[3/8] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
-    echo "Installing ComfyUI and ComfyUI Manager..."
-    cd /workspace
+echo "Installing ComfyUI and ComfyUI Manager..."
+cd /workspace
 
-    # Download and run the ComfyUI-Manager install script
-    wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyui-venv-linux.sh -O install-comfyui-venv-linux.sh
-    chmod +x install-comfyui-venv-linux.sh
-    ./install-comfyui-venv-linux.sh
+# Download and run the ComfyUI-Manager install script
+wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyui-venv-linux.sh -O install-comfyui-venv-linux.sh
+chmod +x install-comfyui-venv-linux.sh
+./install-comfyui-venv-linux.sh
 
-    # Add the --listen flag to run_gpu.sh for network access
-    echo "Configuring ComfyUI for network access..."
-    sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
-    chmod +x /workspace/run_gpu.sh
+# Add the --listen flag to run_gpu.sh for network access
+echo "Configuring ComfyUI for network access..."
+sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
+chmod +x /workspace/run_gpu.sh
 
-    # Install custom nodes
-    echo "Installing ComfyUI custom nodes..."
-    git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
-    git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
+# Install custom nodes
+echo "Installing ComfyUI custom nodes..."
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 
-    # Clean up ComfyUI installer artifacts
-    rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
+# Clean up ComfyUI installer artifacts
+rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
 else
-    echo "ComfyUI already exists, skipping installation."
+echo "ComfyUI already exists, skipping installation."
 fi
 
 # Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
@@ -225,51 +216,51 @@ mkdir -p "$MODELS_DIR"
 #  unet, upscale_models, vae, vae_approx, …and any future additions).
 echo "Symlinking ComfyUI model directories to shared models..."
 for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
-    # Skip if the glob matched nothing
-    [ -d "$comfy_subdir" ] || continue
+# Skip if the glob matched nothing
+[ -d "$comfy_subdir" ] || continue
 
-    dir_name="$(basename "$comfy_subdir")"
-    shared_subdir="$MODELS_DIR/$dir_name"
-    mkdir -p "$shared_subdir"
+dir_name="$(basename "$comfy_subdir")"
+shared_subdir="$MODELS_DIR/$dir_name"
+mkdir -p "$shared_subdir"
 
-    # If it's a real directory (not already a symlink), migrate its contents
-    if [ ! -L "$comfy_subdir" ]; then
-        cp -rn "$comfy_subdir"* "$shared_subdir"/ 2>/dev/null || true
-        rm -rf "$comfy_subdir"
-    fi
-    ln -sfn "$shared_subdir" "${comfy_subdir%/}"
+# If it's a real directory (not already a symlink), migrate its contents
+if [ ! -L "$comfy_subdir" ]; then
+cp -rn "$comfy_subdir"* "$shared_subdir"/ 2>/dev/null || true
+rm -rf "$comfy_subdir"
+fi
+ln -sfn "$shared_subdir" "${comfy_subdir%/}"
 done
 
 # --- A1111: symlink model directories to the same shared location ---
 # Map A1111 folder names → shared folder names (where they differ)
 echo "Symlinking A1111 model directories to shared models..."
 declare -A A1111_MAP=(
-    ["Stable-diffusion"]="checkpoints"
-    ["VAE"]="vae"
-    ["Lora"]="loras"
-    ["hypernetworks"]="hypernetworks"
-    ["ESRGAN"]="upscale_models"
-    ["ControlNet"]="controlnet"
+["Stable-diffusion"]="checkpoints"
+["VAE"]="vae"
+["Lora"]="loras"
+["hypernetworks"]="hypernetworks"
+["ESRGAN"]="upscale_models"
+["ControlNet"]="controlnet"
 )
 
 for a1111_name in "${!A1111_MAP[@]}"; do
-    shared_name="${A1111_MAP[$a1111_name]}"
-    src="$WEBUI_DIR/models/$a1111_name"
-    dst="$MODELS_DIR/$shared_name"
-    mkdir -p "$dst"
+shared_name="${A1111_MAP[$a1111_name]}"
+src="$WEBUI_DIR/models/$a1111_name"
+dst="$MODELS_DIR/$shared_name"
+mkdir -p "$dst"
 
-    if [ -d "$src" ] && [ ! -L "$src" ]; then
-        cp -rn "$src"/* "$dst"/ 2>/dev/null || true
-        rm -rf "$src"
-    fi
-    ln -sfn "$dst" "$src"
+if [ -d "$src" ] && [ ! -L "$src" ]; then
+cp -rn "$src"/* "$dst"/ 2>/dev/null || true
+rm -rf "$src"
+fi
+ln -sfn "$dst" "$src"
 done
 
 # A1111 embeddings live at top level, not inside models/
 mkdir -p "$MODELS_DIR/embeddings"
 if [ -d "$WEBUI_DIR/embeddings" ] && [ ! -L "$WEBUI_DIR/embeddings" ]; then
-    cp -rn "$WEBUI_DIR/embeddings"/* "$MODELS_DIR/embeddings"/ 2>/dev/null || true
-    rm -rf "$WEBUI_DIR/embeddings"
+cp -rn "$WEBUI_DIR/embeddings"/* "$MODELS_DIR/embeddings"/ 2>/dev/null || true
+rm -rf "$WEBUI_DIR/embeddings"
 fi
 ln -sfn "$MODELS_DIR/embeddings" "$WEBUI_DIR/embeddings"
 
@@ -287,28 +278,18 @@ echo "========================================"
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 
 if [ ! -f "$FB_DB" ]; then
-    filebrowser config init --database "$FB_DB"
-    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
-    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+filebrowser config init --database "$FB_DB"
+filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
+filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
 fi
 
 # ==============================================================================
 # 6. Ollama (LLM inference server for comfyui-ollama)
 # ==============================================================================
 echo "========================================"
-echo "[6/8] Installing Ollama & pulling qwen3-vl:4b model..."
+echo "[6/8] Installing Ollama..."
 echo "========================================"
 curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
-# Start serve temporarily, pull the model, then stop.
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
-OLLAMA_TMP_PID=$!
-sleep 3
-echo "Pulling qwen3-vl:4b model..."
-OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b
-kill $OLLAMA_TMP_PID 2>/dev/null
-wait $OLLAMA_TMP_PID 2>/dev/null || true
 
 # ==============================================================================
 # 7. Cleanup
@@ -321,4 +302,3 @@ rm -f /workspace/install_script.sh
 # ==============================================================================
 # 8. Start all services
 # ==============================================================================
-start_services
