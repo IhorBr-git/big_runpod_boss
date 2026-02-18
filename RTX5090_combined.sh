@@ -63,27 +63,22 @@ systemctl disable ollama 2>/dev/null || true
 systemctl stop ollama 2>/dev/null || true
 fi
 
-# Disable A1111 auto-loading checkpoint at startup (saves ~8 GB VRAM for ComfyUI).
-# User can still select a model manually from the A1111 dropdown.
-python3 - "$WEBUI_DIR/config.json" << 'PYEOF'
-import json, sys
-path = sys.argv[1]
-try:
-    with open(path) as f:
-        cfg = json.load(f)
-except (FileNotFoundError, json.JSONDecodeError):
-    cfg = {}
-cfg["sd_checkpoint_autoload"] = False
-with open(path, "w") as f:
-    json.dump(cfg, f, indent=4)
-print(f"A1111 config: sd_checkpoint_autoload=false in {path}")
-PYEOF
-
 # Start RunPod handler (only once for both services)
 /start.sh &
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
+
+# Free VRAM: A1111 auto-loads a checkpoint on startup (~8 GB); unload it via API
+# so the full 32 GB is available for ComfyUI. Users can load a model from the
+# A1111 dropdown when they actually need it.
+(
+while ! curl -sf http://127.0.0.1:3000/sdapi/v1/sd-models > /dev/null 2>&1; do
+    sleep 5
+done
+curl -sf -X POST http://127.0.0.1:3000/sdapi/v1/unload-checkpoint
+echo "A1111: checkpoint unloaded from VRAM to free memory for ComfyUI"
+) &
 
 # Start ComfyUI
 /workspace/run_gpu.sh &
