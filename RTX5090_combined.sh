@@ -78,10 +78,8 @@ fi
 filebrowser --database "$FB_DB" &
 
 # Start Ollama server (used by comfyui-ollama node)
-# Force CPU-only mode: ComfyUI's diffusion models (Flux, CLIP, VAE, ControlNet)
-# consume most of the 32 GB VRAM, leaving too little for Ollama's LLM on GPU.
-# CPU inference is fast enough for text-prompt generation and avoids OOM crashes.
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
+# CPU-only mode is enforced globally via OLLAMA_NUM_GPU=0 exported at the top.
+OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 
 # Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
 echo "Ensuring Ollama model qwen3-vl:4b is available..."
@@ -315,7 +313,7 @@ systemctl stop ollama 2>/dev/null || true
 
 # Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
 # Start serve temporarily, pull the model, then stop.
-OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
+OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 OLLAMA_TMP_PID=$!
 sleep 3
 echo "Pulling qwen3-vl:4b model..."
