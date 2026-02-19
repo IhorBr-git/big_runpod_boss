@@ -25,6 +25,8 @@ MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
 # Persist Ollama models on the workspace volume (survives pod restarts)
 export OLLAMA_MODELS="/workspace/.ollama/models"
+# Force Ollama to CPU-only globally so no subprocess can grab VRAM
+export OLLAMA_NUM_GPU=0
 
 # ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
