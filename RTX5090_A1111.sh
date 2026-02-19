@@ -73,12 +73,12 @@ echo "Pre-installing CLIP..."
 
 # ---- Install extensions ----
 echo "Installing extensions..."
-[ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
-    git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
 [ ! -d "$WEBUI_DIR/extensions/aspect-ratio-helper" ] && \
     git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
     git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
+[ ! -d "$WEBUI_DIR/extensions/unload-button" ] && \
+    git clone https://github.com/ClashSAN/unload-button.git "$WEBUI_DIR/extensions/unload-button" || true
 
 # ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"

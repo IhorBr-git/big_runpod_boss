@@ -22,8 +22,8 @@ export OLLAMA_MODELS="/workspace/.ollama/models"
 
 # ---- Install filebrowser if not present ----
 if ! command -v filebrowser &> /dev/null; then
-    echo "Installing filebrowser..."
-    curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
+echo "Installing filebrowser..."
+curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
 fi
 
 # Download and install ComfyUI using the ComfyUI-Manager script.
@@ -52,23 +52,25 @@ python3 -m venv --system-site-packages /workspace/ComfyUI/venv
 # that may lack GPU support or be incompatible with the CUDA driver.
 echo "Installing ComfyUI requirements (keeping system torch)..."
 grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' /workspace/ComfyUI/requirements.txt \
-    > /tmp/comfyui_reqs_filtered.txt
+> /tmp/comfyui_reqs_filtered.txt
 /workspace/ComfyUI/venv/bin/pip install -r /tmp/comfyui_reqs_filtered.txt
 
 # Installing custom nodes
 echo "Installing ComfyUI custom nodes..."
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/dsigmabcn/comfyui-model-downloader.git
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
+git -C /workspace/ComfyUI/custom_nodes clone https://github.com/crystian/ComfyUI-Crystools.git
+/workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Crystools/requirements.txt
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/stavsap/comfyui-ollama.git
 /workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-ollama/requirements.txt
 
 # ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"
 if [ ! -f "$FB_DB" ]; then
-    echo "Configuring File Browser..."
-    filebrowser config init --database "$FB_DB"
-    filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
-    filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
+echo "Configuring File Browser..."
+filebrowser config init --database "$FB_DB"
+filebrowser config set --address 0.0.0.0 --port 8080 --root /workspace --database "$FB_DB"
+filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
 fi
 
 # ---- Install Ollama LLM server (used by comfyui-ollama extension) ----

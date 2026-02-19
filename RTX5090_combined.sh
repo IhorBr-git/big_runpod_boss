@@ -69,17 +69,6 @@ fi
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
 
-# Free VRAM: A1111 auto-loads a checkpoint on startup (~8 GB); unload it via API
-# so the full 32 GB is available for ComfyUI. Users can load a model from the
-# A1111 dropdown when they actually need it.
-(
-while ! curl -sf http://127.0.0.1:3000/sdapi/v1/sd-models > /dev/null 2>&1; do
-    sleep 5
-done
-curl -sf -X POST http://127.0.0.1:3000/sdapi/v1/unload-checkpoint
-echo "A1111: checkpoint unloaded from VRAM to free memory for ComfyUI"
-) &
-
 # Start ComfyUI
 /workspace/run_gpu.sh &
 
@@ -92,10 +81,10 @@ filebrowser --database "$FB_DB" &
 # CPU inference is fast enough for text-prompt generation and avoids OOM crashes.
 OLLAMA_HOST=0.0.0.0:11434 OLLAMA_NUM_GPU=0 ollama serve &
 
-    # Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
-    echo "Ensuring Ollama model qwen3-vl:4b is available..."
-    sleep 3  # wait for Ollama server to be ready
-    OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
+# Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
+echo "Ensuring Ollama model qwen3-vl:4b is available..."
+sleep 3  # wait for Ollama server to be ready
+OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
 
 # Keep the container alive as long as any service is running
 wait
@@ -175,12 +164,12 @@ https://github.com/openai/CLIP/archive/d50d76daa670286dd6cacf3bcd80b5e4823fc8e1.
 
 # ---- Install extensions (only if not already present) ----
 echo "Installing A1111 extensions..."
-[ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
-git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
 [ ! -d "$WEBUI_DIR/extensions/aspect-ratio-helper" ] && \
 git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
+[ ! -d "$WEBUI_DIR/extensions/unload-button" ] && \
+git clone https://github.com/ClashSAN/unload-button.git "$WEBUI_DIR/extensions/unload-button" || true
 
 # ==============================================================================
 # 3. ComfyUI
@@ -207,6 +196,8 @@ chmod +x /workspace/run_gpu.sh
 echo "Installing ComfyUI custom nodes..."
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/crystian/ComfyUI-Crystools.git
+"$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 
 # Clean up ComfyUI installer artifacts
 rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
@@ -340,4 +331,3 @@ rm -f /workspace/install_script.sh
 
 # ==============================================================================
 # 8. Start all services
-# ==============================================================================
