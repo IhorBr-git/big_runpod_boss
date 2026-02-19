@@ -35,22 +35,11 @@ export OLLAMA_NUM_GPU=0
 ensure_vram_guard() {
 echo "Creating VRAM Guard extension..."
 mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
+mkdir -p "$WEBUI_DIR/extensions/vram-guard/javascript"
 cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
 import torch
-import gradio as gr
-import modules.scripts as scripts
 from modules import script_callbacks, sd_models
-
-
-def _vram_info():
-    if not torch.cuda.is_available():
-        return "CUDA not available"
-    dev = torch.cuda.current_device()
-    alloc = torch.cuda.memory_allocated(dev) / 1024**3
-    total = torch.cuda.get_device_properties(dev).total_memory / 1024**3
-    name = torch.cuda.get_device_name(dev)
-    return f"{name}  |  Used: {alloc:.1f} GB / {total:.1f} GB  |  Free: {total - alloc:.1f} GB"
 
 
 def _flush():
@@ -66,35 +55,12 @@ def _unload_all():
     except Exception:
         pass
     _flush()
-    return _vram_info()
-
-
-class VRAMGuardScript(scripts.Script):
-    def title(self):
-        return "VRAM Guard"
-
-    def show(self, is_img2img):
-        return scripts.AlwaysVisible
-
-    def ui(self, is_img2img):
-        with gr.Accordion("VRAM Guard", open=True):
-            gr.HTML(
-                "<style>"
-                ".vram-guard-btn{min-height:80px !important;"
-                "font-size:1.4em !important;font-weight:700 !important}"
-                "</style>"
-            )
-            status = gr.Textbox(
-                value=_vram_info(), lines=1,
-                interactive=False, show_label=False,
-            )
-            btn = gr.Button(
-                "UNLOAD ALL MODELS",
-                variant="stop",
-                elem_classes=["vram-guard-btn"],
-            )
-            btn.click(fn=_unload_all, outputs=[status])
-        return []
+    if not torch.cuda.is_available():
+        return "CUDA N/A"
+    dev = torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(dev) / 1024**3
+    total = torch.cuda.get_device_properties(dev).total_memory / 1024**3
+    return f"Used: {alloc:.1f}/{total:.1f} GB"
 
 
 def _add_api(_demo, app):
@@ -102,13 +68,42 @@ def _add_api(_demo, app):
     async def api_unload_all():
         return {"vram": _unload_all()}
 
-    @app.get("/vram-guard/vram-info")
-    async def api_vram():
-        return {"vram": _vram_info()}
-
-
 script_callbacks.on_app_started(_add_api)
 PYEOF
+cat > "$WEBUI_DIR/extensions/vram-guard/javascript/vram_guard.js" << 'JSEOF'
+onUiLoaded(function () {
+    var qs = gradioApp().getElementById("quicksettings");
+    if (!qs) return;
+
+    var btn = document.createElement("button");
+    btn.textContent = "Unload Model";
+    btn.title = "Free VRAM — unload the current checkpoint";
+    btn.style.cssText =
+        "max-height:42px;margin:auto 0 auto 8px;background:#dc2626;color:#fff;" +
+        "border:none;border-radius:8px;padding:8px 16px;font-weight:600;" +
+        "font-size:14px;cursor:pointer;white-space:nowrap;";
+
+    btn.addEventListener("mouseenter", function () { btn.style.background = "#b91c1c"; });
+    btn.addEventListener("mouseleave", function () { btn.style.background = "#dc2626"; });
+
+    btn.addEventListener("click", async function () {
+        var orig = btn.textContent;
+        btn.textContent = "Unloading\u2026";
+        btn.disabled = true;
+        try {
+            var r = await fetch("/vram-guard/unload-all", { method: "POST" });
+            var d = await r.json();
+            btn.textContent = d.vram || "Done";
+            setTimeout(function () { btn.textContent = orig; btn.disabled = false; }, 3000);
+        } catch (e) {
+            btn.textContent = "Error";
+            setTimeout(function () { btn.textContent = orig; btn.disabled = false; }, 2000);
+        }
+    });
+
+    qs.appendChild(btn);
+});
+JSEOF
 }
 
 # ------------------------------------------------------------------------------
@@ -227,7 +222,7 @@ export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's dev torch build
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api"
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --theme=dark"
 EOF
 
 # ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
@@ -254,6 +249,8 @@ echo "Installing A1111 extensions..."
 git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
+[ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
+git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
 # ==============================================================================
 # 3. ComfyUI
 # ==============================================================================
