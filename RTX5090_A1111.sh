@@ -77,16 +77,15 @@ echo "Installing extensions..."
     git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
     git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
-# ---- Create VRAM Guard extension (unload models & monitor VRAM from the UI) ----
-VRAM_GUARD_DIR="$WEBUI_DIR/extensions/vram-guard"
-if [ ! -d "$VRAM_GUARD_DIR" ]; then
-    echo "Creating VRAM Guard extension..."
-    mkdir -p "$VRAM_GUARD_DIR/scripts"
-    cat > "$VRAM_GUARD_DIR/scripts/vram_guard.py" << 'PYEOF'
+# ---- Create VRAM Guard extension (big unload button on the main page) ----
+echo "Creating VRAM Guard extension..."
+mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
+cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
 import torch
 import gradio as gr
-from modules import script_callbacks, shared, sd_models
+import modules.scripts as scripts
+from modules import script_callbacks, sd_models
 
 
 def _vram_info():
@@ -94,14 +93,9 @@ def _vram_info():
         return "CUDA not available"
     dev = torch.cuda.current_device()
     alloc = torch.cuda.memory_allocated(dev) / 1024**3
-    total = torch.cuda.get_device_properties(dev).total_mem / 1024**3
+    total = torch.cuda.get_device_properties(dev).total_memory / 1024**3
     name = torch.cuda.get_device_name(dev)
-    return (
-        f"GPU:        {name}\n"
-        f"Allocated:  {alloc:.2f} GB\n"
-        f"Total:      {total:.2f} GB\n"
-        f"Free:       {total - alloc:.2f} GB"
-    )
+    return f"{name}  |  Used: {alloc:.1f} GB / {total:.1f} GB  |  Free: {total - alloc:.1f} GB"
 
 
 def _flush():
@@ -111,7 +105,7 @@ def _flush():
         torch.cuda.ipc_collect()
 
 
-def unload_checkpoint():
+def _unload_all():
     try:
         sd_models.unload_model_weights()
     except Exception:
@@ -120,55 +114,46 @@ def unload_checkpoint():
     return _vram_info()
 
 
-def unload_all():
-    try:
-        sd_models.unload_model_weights()
-    except Exception:
-        pass
-    _flush()
-    return _vram_info()
+class VRAMGuardScript(scripts.Script):
+    def title(self):
+        return "VRAM Guard"
 
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
 
-def on_ui_tabs():
-    with gr.Blocks(analytics_enabled=False) as tab:
-        with gr.Column():
-            gr.Markdown("## VRAM Manager")
-            gr.Markdown(
-                "Free GPU memory by unloading models. "
-                "Useful when switching between A1111 and ComfyUI."
+    def ui(self, is_img2img):
+        with gr.Accordion("VRAM Guard", open=True):
+            gr.HTML(
+                "<style>"
+                ".vram-guard-btn{min-height:80px !important;"
+                "font-size:1.4em !important;font-weight:700 !important}"
+                "</style>"
             )
-            vram_box = gr.Textbox(
-                label="VRAM Status", value=_vram_info(),
-                lines=5, interactive=False,
+            status = gr.Textbox(
+                value=_vram_info(), lines=1,
+                interactive=False, show_label=False,
             )
-            with gr.Row():
-                btn_ckpt = gr.Button("Unload Checkpoint", variant="primary")
-                btn_all = gr.Button("Unload Everything", variant="stop")
-                btn_ref = gr.Button("Refresh")
-            btn_ckpt.click(fn=unload_checkpoint, outputs=[vram_box])
-            btn_all.click(fn=unload_all, outputs=[vram_box])
-            btn_ref.click(fn=_vram_info, outputs=[vram_box])
-    return [(tab, "VRAM Manager", "vram_manager")]
+            btn = gr.Button(
+                "UNLOAD ALL MODELS",
+                variant="stop",
+                elem_classes=["vram-guard-btn"],
+            )
+            btn.click(fn=_unload_all, outputs=[status])
+        return []
 
 
-def add_api(_demo, app):
-    @app.post("/vram-guard/unload-checkpoint")
-    async def api_unload_ckpt():
-        return {"vram": unload_checkpoint()}
-
+def _add_api(_demo, app):
     @app.post("/vram-guard/unload-all")
     async def api_unload_all():
-        return {"vram": unload_all()}
+        return {"vram": _unload_all()}
 
     @app.get("/vram-guard/vram-info")
     async def api_vram():
         return {"vram": _vram_info()}
 
 
-script_callbacks.on_ui_tabs(on_ui_tabs)
-script_callbacks.on_app_started(add_api)
+script_callbacks.on_app_started(_add_api)
 PYEOF
-fi
 
 # ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"

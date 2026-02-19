@@ -29,9 +29,95 @@ export OLLAMA_MODELS="/workspace/.ollama/models"
 export OLLAMA_NUM_GPU=0
 
 # ------------------------------------------------------------------------------
+# ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
+# Called from start_services() so it works on both fresh install and pod restart.
+# ------------------------------------------------------------------------------
+ensure_vram_guard() {
+echo "Creating VRAM Guard extension..."
+mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
+cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
+import gc
+import torch
+import gradio as gr
+import modules.scripts as scripts
+from modules import script_callbacks, sd_models
+
+
+def _vram_info():
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    dev = torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(dev) / 1024**3
+    total = torch.cuda.get_device_properties(dev).total_memory / 1024**3
+    name = torch.cuda.get_device_name(dev)
+    return f"{name}  |  Used: {alloc:.1f} GB / {total:.1f} GB  |  Free: {total - alloc:.1f} GB"
+
+
+def _flush():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
+def _unload_all():
+    try:
+        sd_models.unload_model_weights()
+    except Exception:
+        pass
+    _flush()
+    return _vram_info()
+
+
+class VRAMGuardScript(scripts.Script):
+    def title(self):
+        return "VRAM Guard"
+
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
+
+    def ui(self, is_img2img):
+        with gr.Accordion("VRAM Guard", open=True):
+            gr.HTML(
+                "<style>"
+                ".vram-guard-btn{min-height:80px !important;"
+                "font-size:1.4em !important;font-weight:700 !important}"
+                "</style>"
+            )
+            status = gr.Textbox(
+                value=_vram_info(), lines=1,
+                interactive=False, show_label=False,
+            )
+            btn = gr.Button(
+                "UNLOAD ALL MODELS",
+                variant="stop",
+                elem_classes=["vram-guard-btn"],
+            )
+            btn.click(fn=_unload_all, outputs=[status])
+        return []
+
+
+def _add_api(_demo, app):
+    @app.post("/vram-guard/unload-all")
+    async def api_unload_all():
+        return {"vram": _unload_all()}
+
+    @app.get("/vram-guard/vram-info")
+    async def api_vram():
+        return {"vram": _vram_info()}
+
+
+script_callbacks.on_app_started(_add_api)
+PYEOF
+}
+
+# ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
+# Ensure the VRAM Guard extension exists (covers pod restarts where install is skipped)
+ensure_vram_guard
+
 echo "========================================"
 echo "Starting services..."
 echo "========================================"
@@ -168,9 +254,6 @@ echo "Installing A1111 extensions..."
 git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
-[ ! -d "$WEBUI_DIR/extensions/unload-button" ] && \
-git clone https://github.com/ClashSAN/unload-button.git "$WEBUI_DIR/extensions/unload-button" || true
-
 # ==============================================================================
 # 3. ComfyUI
 # ==============================================================================
