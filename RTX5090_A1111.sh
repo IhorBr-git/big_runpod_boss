@@ -86,7 +86,7 @@ mkdir -p "$WEBUI_DIR/extensions/vram-guard/javascript"
 cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
 import torch
-from modules import script_callbacks, sd_models
+from modules import script_callbacks, shared, sd_models
 
 
 def _flush():
@@ -96,12 +96,7 @@ def _flush():
         torch.cuda.ipc_collect()
 
 
-def _unload_all():
-    try:
-        sd_models.unload_model_weights()
-    except Exception:
-        pass
-    _flush()
+def _vram_str():
     if not torch.cuda.is_available():
         return "CUDA N/A"
     dev = torch.cuda.current_device()
@@ -110,10 +105,31 @@ def _unload_all():
     return f"Used: {alloc:.1f}/{total:.1f} GB"
 
 
+def _unload_all():
+    try:
+        sd_models.unload_model_weights()
+    except Exception:
+        pass
+    _flush()
+    return _vram_str()
+
+
+def _reload_model():
+    try:
+        sd_models.reload_model_weights()
+    except Exception:
+        pass
+    return _vram_str()
+
+
 def _add_api(_demo, app):
     @app.post("/vram-guard/unload-all")
     async def api_unload_all():
         return {"vram": _unload_all()}
+
+    @app.post("/vram-guard/reload")
+    async def api_reload():
+        return {"vram": _reload_model()}
 
 script_callbacks.on_app_started(_add_api)
 PYEOF
@@ -122,33 +138,45 @@ onUiLoaded(function () {
     var qs = gradioApp().getElementById("quicksettings");
     if (!qs) return;
 
-    var btn = document.createElement("button");
-    btn.textContent = "Unload Model";
-    btn.title = "Free VRAM — unload the current checkpoint";
-    btn.style.cssText =
-        "max-height:42px;margin:auto 0 auto 8px;background:#dc2626;color:#fff;" +
-        "border:none;border-radius:8px;padding:8px 16px;font-weight:600;" +
-        "font-size:14px;cursor:pointer;white-space:nowrap;";
+    function makeBtn(label, title, bg, bgHover, endpoint) {
+        var b = document.createElement("button");
+        b.textContent = label;
+        b.title = title;
+        b.style.cssText =
+            "max-height:42px;margin:auto 0 auto 4px;background:" + bg + ";color:#fff;" +
+            "border:none;border-radius:8px;padding:8px 16px;font-weight:600;" +
+            "font-size:14px;cursor:pointer;white-space:nowrap;";
+        b.addEventListener("mouseenter", function () { b.style.background = bgHover; });
+        b.addEventListener("mouseleave", function () { b.style.background = bg; });
+        b.addEventListener("click", async function () {
+            var orig = b.textContent;
+            b.textContent = "\u23F3";
+            b.disabled = true;
+            try {
+                var r = await fetch(endpoint, { method: "POST" });
+                var d = await r.json();
+                b.textContent = d.vram || "Done";
+                setTimeout(function () { b.textContent = orig; b.disabled = false; }, 3000);
+            } catch (e) {
+                b.textContent = "Error";
+                setTimeout(function () { b.textContent = orig; b.disabled = false; }, 2000);
+            }
+        });
+        return b;
+    }
 
-    btn.addEventListener("mouseenter", function () { btn.style.background = "#b91c1c"; });
-    btn.addEventListener("mouseleave", function () { btn.style.background = "#dc2626"; });
-
-    btn.addEventListener("click", async function () {
-        var orig = btn.textContent;
-        btn.textContent = "Unloading\u2026";
-        btn.disabled = true;
-        try {
-            var r = await fetch("/vram-guard/unload-all", { method: "POST" });
-            var d = await r.json();
-            btn.textContent = d.vram || "Done";
-            setTimeout(function () { btn.textContent = orig; btn.disabled = false; }, 3000);
-        } catch (e) {
-            btn.textContent = "Error";
-            setTimeout(function () { btn.textContent = orig; btn.disabled = false; }, 2000);
-        }
-    });
-
-    qs.appendChild(btn);
+    qs.appendChild(makeBtn(
+        "Unload Model",
+        "Free VRAM \u2014 unload the current checkpoint",
+        "#dc2626", "#b91c1c",
+        "/vram-guard/unload-all"
+    ));
+    qs.appendChild(makeBtn(
+        "Load Model",
+        "Reload the selected checkpoint into VRAM",
+        "#2563eb", "#1d4ed8",
+        "/vram-guard/reload"
+    ));
 });
 JSEOF
 
