@@ -71,6 +71,10 @@ def _unload_all():
 
 def _reload_model():
     try:
+        # Clear stale reference so reload_model_weights() does a fresh load
+        # instead of comparing checkpoint info and skipping (happens after unload).
+        shared.sd_model = None
+        _flush()
         sd_models.reload_model_weights()
     except Exception:
         pass
