@@ -25,7 +25,9 @@ MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
 # Persist Ollama models on the workspace volume (survives pod restarts)
 export OLLAMA_MODELS="/workspace/.ollama/models"
-# Force Ollama to CPU-only globally so no subprocess can grab VRAM
+# Force Ollama to CPU-only so it cannot grab VRAM.
+# OLLAMA_NUM_GPU=0 is an Ollama-level hint; CUDA_VISIBLE_DEVICES="" hides the GPU
+# at the CUDA runtime level (bulletproof). Both are applied to ollama commands below.
 export OLLAMA_NUM_GPU=0
 
 # ------------------------------------------------------------------------------
@@ -187,13 +189,13 @@ fi
 filebrowser --database "$FB_DB" &
 
 # Start Ollama server (used by comfyui-ollama node)
-# CPU-only mode is enforced globally via OLLAMA_NUM_GPU=0 exported at the top.
-OLLAMA_HOST=0.0.0.0:11434 ollama serve &
+# CUDA_VISIBLE_DEVICES="" hides the GPU at CUDA runtime level — Ollama cannot use VRAM.
+CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 
 # Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
 echo "Ensuring Ollama model qwen3-vl:4b is available..."
 sleep 3  # wait for Ollama server to be ready
-OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
+CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
 
 # Keep the container alive as long as any service is running
 wait
@@ -421,11 +423,11 @@ systemctl stop ollama 2>/dev/null || true
 
 # Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
 # Start serve temporarily, pull the model, then stop.
-OLLAMA_HOST=0.0.0.0:11434 ollama serve &
+CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama serve &
 OLLAMA_TMP_PID=$!
 sleep 3
 echo "Pulling qwen3-vl:4b model..."
-OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b
+CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b
 kill $OLLAMA_TMP_PID 2>/dev/null
 wait $OLLAMA_TMP_PID 2>/dev/null || true
 

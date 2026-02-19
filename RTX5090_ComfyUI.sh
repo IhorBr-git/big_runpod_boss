@@ -19,7 +19,9 @@ cd /workspace
 
 # Persist Ollama models on the workspace volume (survives pod restarts)
 export OLLAMA_MODELS="/workspace/.ollama/models"
-# Force Ollama to CPU-only globally so no subprocess can grab VRAM
+# Force Ollama to CPU-only so it cannot grab VRAM.
+# OLLAMA_NUM_GPU=0 is an Ollama-level hint; CUDA_VISIBLE_DEVICES="" hides the GPU
+# at the CUDA runtime level (bulletproof). Both are applied to ollama commands below.
 export OLLAMA_NUM_GPU=0
 
 # ---- Install filebrowser if not present ----
@@ -86,11 +88,11 @@ systemctl stop ollama 2>/dev/null || true
 
 # Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
 # Start serve temporarily, pull the model, then stop.
-ollama serve &
+CUDA_VISIBLE_DEVICES="" ollama serve &
 OLLAMA_TMP_PID=$!
 sleep 3
 echo "Pulling qwen3-vl:4b model..."
-ollama pull qwen3-vl:4b
+CUDA_VISIBLE_DEVICES="" ollama pull qwen3-vl:4b
 kill $OLLAMA_TMP_PID 2>/dev/null
 wait $OLLAMA_TMP_PID 2>/dev/null || true
 
@@ -100,4 +102,4 @@ rm -f install_script.sh run_cpu.sh install-comfyui-venv-linux.sh
 
 # Start the main Runpod service, ComfyUI, Ollama, and File Browser in the background.
 echo "Starting ComfyUI, Ollama, File Browser, and Runpod services..."
-(/start.sh & ollama serve & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
+(/start.sh & CUDA_VISIBLE_DEVICES="" ollama serve & filebrowser --database "$FB_DB" & /workspace/run_gpu.sh)
