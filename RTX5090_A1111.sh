@@ -77,8 +77,98 @@ echo "Installing extensions..."
     git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI_DIR/extensions/aspect-ratio-helper" || true
 [ ! -d "$WEBUI_DIR/extensions/ultimate-upscale" ] && \
     git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
-[ ! -d "$WEBUI_DIR/extensions/unload-button" ] && \
-    git clone https://github.com/ClashSAN/unload-button.git "$WEBUI_DIR/extensions/unload-button" || true
+# ---- Create VRAM Guard extension (unload models & monitor VRAM from the UI) ----
+VRAM_GUARD_DIR="$WEBUI_DIR/extensions/vram-guard"
+if [ ! -d "$VRAM_GUARD_DIR" ]; then
+    echo "Creating VRAM Guard extension..."
+    mkdir -p "$VRAM_GUARD_DIR/scripts"
+    cat > "$VRAM_GUARD_DIR/scripts/vram_guard.py" << 'PYEOF'
+import gc
+import torch
+import gradio as gr
+from modules import script_callbacks, shared, sd_models
+
+
+def _vram_info():
+    if not torch.cuda.is_available():
+        return "CUDA not available"
+    dev = torch.cuda.current_device()
+    alloc = torch.cuda.memory_allocated(dev) / 1024**3
+    total = torch.cuda.get_device_properties(dev).total_mem / 1024**3
+    name = torch.cuda.get_device_name(dev)
+    return (
+        f"GPU:        {name}\n"
+        f"Allocated:  {alloc:.2f} GB\n"
+        f"Total:      {total:.2f} GB\n"
+        f"Free:       {total - alloc:.2f} GB"
+    )
+
+
+def _flush():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+
+
+def unload_checkpoint():
+    try:
+        sd_models.unload_model_weights()
+    except Exception:
+        pass
+    _flush()
+    return _vram_info()
+
+
+def unload_all():
+    try:
+        sd_models.unload_model_weights()
+    except Exception:
+        pass
+    _flush()
+    return _vram_info()
+
+
+def on_ui_tabs():
+    with gr.Blocks(analytics_enabled=False) as tab:
+        with gr.Column():
+            gr.Markdown("## VRAM Manager")
+            gr.Markdown(
+                "Free GPU memory by unloading models. "
+                "Useful when switching between A1111 and ComfyUI."
+            )
+            vram_box = gr.Textbox(
+                label="VRAM Status", value=_vram_info(),
+                lines=5, interactive=False,
+            )
+            with gr.Row():
+                btn_ckpt = gr.Button("Unload Checkpoint", variant="primary")
+                btn_all = gr.Button("Unload Everything", variant="stop")
+                btn_ref = gr.Button("Refresh")
+            btn_ckpt.click(fn=unload_checkpoint, outputs=[vram_box])
+            btn_all.click(fn=unload_all, outputs=[vram_box])
+            btn_ref.click(fn=_vram_info, outputs=[vram_box])
+    return [(tab, "VRAM Manager", "vram_manager")]
+
+
+def add_api(_demo, app):
+    @app.post("/vram-guard/unload-checkpoint")
+    async def api_unload_ckpt():
+        return {"vram": unload_checkpoint()}
+
+    @app.post("/vram-guard/unload-all")
+    async def api_unload_all():
+        return {"vram": unload_all()}
+
+    @app.get("/vram-guard/vram-info")
+    async def api_vram():
+        return {"vram": _vram_info()}
+
+
+script_callbacks.on_ui_tabs(on_ui_tabs)
+script_callbacks.on_app_started(add_api)
+PYEOF
+fi
 
 # ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"
