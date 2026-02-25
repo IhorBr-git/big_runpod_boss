@@ -72,6 +72,9 @@ fi
 
 if ! command -v rclone &> /dev/null; then
 echo "Installing rclone..."
+if ! command -v unzip &> /dev/null; then
+apt-get update && apt-get install -y --no-install-recommends unzip && rm -rf /var/lib/apt/lists/*
+fi
 curl -fsSL https://rclone.org/install.sh | bash
 fi
 
@@ -308,7 +311,7 @@ echo "========================================"
 echo "[1/8] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd fuse3 \
+wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd fuse3 unzip \
 && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
