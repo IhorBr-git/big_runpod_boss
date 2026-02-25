@@ -7,7 +7,6 @@
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
 #   - File Browser                           (port 8080)
-#   - Ollama                                 (port 11434)
 # on a single RunPod pod optimized for RTX 4090 (Ada Lovelace architecture).
 #
 # On pod restart (both dirs already exist) the script skips installation
@@ -23,12 +22,6 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
-# Persist Ollama models on the workspace volume (survives pod restarts)
-export OLLAMA_MODELS="/workspace/.ollama/models"
-# Force Ollama to CPU-only so it cannot grab VRAM.
-# OLLAMA_NUM_GPU=0 is an Ollama-level hint; CUDA_VISIBLE_DEVICES="" hides the GPU
-# at the CUDA runtime level (bulletproof). Both are applied to ollama commands below.
-export OLLAMA_NUM_GPU=0
 
 # ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
@@ -154,7 +147,6 @@ echo "  - RunPod handler  (/start.sh)"
 echo "  - A1111 WebUI     (port 3000)"
 echo "  - ComfyUI         (port 8188)"
 echo "  - File Browser    (port 8080)"
-echo "  - Ollama          (port 11434)"
 echo "========================================"
 
 # Forward SIGTERM/SIGINT to all child processes for clean container shutdown
@@ -163,20 +155,6 @@ trap 'echo "Shutting down..."; kill $(jobs -p) 2>/dev/null; wait' SIGTERM SIGINT
 # Ensure File Browser binary is available (not persisted across pod restarts)
 if ! command -v filebrowser &> /dev/null; then
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
-fi
-
-# Ensure zstd is available (required by Ollama installer, not persisted across restarts)
-if ! command -v zstd &> /dev/null; then
-apt-get update && apt-get install -y --no-install-recommends zstd && rm -rf /var/lib/apt/lists/*
-fi
-
-# Ensure Ollama is installed (binary is not persisted across pod restarts)
-if ! command -v ollama &> /dev/null; then
-echo "Installing Ollama..."
-curl -fsSL https://ollama.com/install.sh | sh
-# The install script auto-starts a systemd service with GPU enabled — kill it.
-systemctl disable ollama 2>/dev/null || true
-systemctl stop ollama 2>/dev/null || true
 fi
 
 # Start RunPod handler (only once for both services)
@@ -190,15 +168,6 @@ fi
 
 # Start File Browser
 filebrowser --database "$FB_DB" &
-
-# Start Ollama server (used by comfyui-ollama node)
-# CUDA_VISIBLE_DEVICES="" hides the GPU at CUDA runtime level — Ollama cannot use VRAM.
-CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama serve &
-
-# Pull the vision-language model if not already present (e.g. after fresh Ollama reinstall)
-echo "Ensuring Ollama model qwen3-vl:4b is available..."
-sleep 3  # wait for Ollama server to be ready
-CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b &
 
 # Keep the container alive as long as any service is running
 wait
@@ -218,17 +187,17 @@ fi
 # 1. System dependencies (Debian-based) — covers both A1111 and ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[1/8] Installing system dependencies..."
+echo "[1/7] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
-wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc zstd \
+wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
 && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
 # 2. A1111 Stable Diffusion WebUI
 # ==============================================================================
 echo "========================================"
-echo "[2/8] Setting up A1111 WebUI..."
+echo "[2/7] Setting up A1111 WebUI..."
 echo "========================================"
 
 # ---- Clone A1111 (skip if already present for pod restarts) ----
@@ -285,7 +254,7 @@ git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensi
 # 3. ComfyUI
 # ==============================================================================
 echo "========================================"
-echo "[3/8] Setting up ComfyUI..."
+echo "[3/7] Setting up ComfyUI..."
 echo "========================================"
 
 if [ ! -d "$COMFYUI_DIR" ]; then
@@ -325,7 +294,7 @@ echo "Upgrading ComfyUI's PyTorch to cu124 for CUDA 12.4 driver compatibility...
 # 4. Shared models directory
 # ==============================================================================
 echo "========================================"
-echo "[4/8] Setting up shared models directory..."
+echo "[4/7] Setting up shared models directory..."
 echo "========================================"
 
 # Create shared models root
@@ -394,7 +363,7 @@ ls -1 "$MODELS_DIR"
 # 5. File Browser (web-based file manager on port 8080)
 # ==============================================================================
 echo "========================================"
-echo "[5/8] Setting up File Browser..."
+echo "[5/7] Setting up File Browser..."
 echo "========================================"
 
 curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash
@@ -406,34 +375,13 @@ filebrowser users add admin adminadmin11 --perm.admin --database "$FB_DB"
 fi
 
 # ==============================================================================
-# 6. Ollama (LLM inference server for comfyui-ollama)
+# 6. Cleanup
 # ==============================================================================
 echo "========================================"
-echo "[6/8] Installing Ollama & pulling qwen3-vl:4b model..."
-echo "========================================"
-curl -fsSL https://ollama.com/install.sh | sh
-# The install script auto-starts a systemd service with GPU enabled — kill it.
-systemctl disable ollama 2>/dev/null || true
-systemctl stop ollama 2>/dev/null || true
-
-# Pull the vision-language model used by the OllamaGenerateV2 node in ComfyUI.
-# Start serve temporarily, pull the model, then stop.
-CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama serve &
-OLLAMA_TMP_PID=$!
-sleep 3
-echo "Pulling qwen3-vl:4b model..."
-CUDA_VISIBLE_DEVICES="" OLLAMA_HOST=0.0.0.0:11434 ollama pull qwen3-vl:4b
-kill $OLLAMA_TMP_PID 2>/dev/null
-wait $OLLAMA_TMP_PID 2>/dev/null || true
-
-# ==============================================================================
-# 7. Cleanup
-# ==============================================================================
-echo "========================================"
-echo "[7/8] Cleaning up..."
+echo "[6/7] Cleaning up..."
 echo "========================================"
 rm -f /workspace/install_script.sh
 
 # ==============================================================================
-# 8. Start all services
+# 7. Start all services
 # ==============================================================================
