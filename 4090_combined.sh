@@ -287,11 +287,12 @@ else
 echo "ComfyUI already exists, skipping installation."
 fi
 
-# Ensure ComfyUI's PyTorch uses cu124 wheels matching the pod's CUDA 12.4 driver.
-# The ComfyUI-Manager installer may default to cu121 — cu124 wheels ensure
-# full compatibility with the host CUDA 12.4 driver and RTX 4090 Ada Lovelace arch.
-echo "Upgrading ComfyUI's PyTorch to cu124 for CUDA 12.4 driver compatibility..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Upgrade ComfyUI's PyTorch to cu130 for optimized CUDA/Triton backends.
+# RunPod hosts now ship driver 580+ (CUDA 13.0). cu130 wheels unlock
+# comfy_kitchen cuda & triton backends on RTX 4090 (Ada Lovelace).
+# A1111 keeps its own venv on the base image's older torch — unaffected.
+echo "Upgrading ComfyUI's PyTorch to cu130 for optimized CUDA operations..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # ==============================================================================
 # 4. Shared models directory
