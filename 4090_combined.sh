@@ -160,6 +160,9 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
+# Ensure typing_extensions is up-to-date in A1111 venv (system copy may be too old for gradio/altair)
+"$WEBUI_DIR/venv/bin/pip" install --upgrade typing_extensions > /dev/null 2>&1 || true
+
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
 

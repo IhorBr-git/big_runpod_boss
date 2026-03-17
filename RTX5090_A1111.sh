@@ -197,6 +197,9 @@ fi
 echo "Cleaning up..."
 rm -f /workspace/install_script.sh
 
+# ---- Ensure typing_extensions is up-to-date (system copy may be too old for gradio/altair) ----
+"$WEBUI_DIR/venv/bin/pip" install --upgrade typing_extensions > /dev/null 2>&1 || true
+
 # ---- Start services ----
 echo "Starting RunPod handler, A1111 WebUI, and File Browser..."
 /start.sh &
