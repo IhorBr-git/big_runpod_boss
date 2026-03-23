@@ -52,6 +52,9 @@ grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' /workspace/Comfy
 > /tmp/comfyui_reqs_filtered.txt
 /workspace/ComfyUI/venv/bin/pip install -r /tmp/comfyui_reqs_filtered.txt
 
+# Reinstall comfyui-manager dependencies (lost when the venv was recreated above)
+/workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-manager/requirements.txt
+
 # Installing custom nodes
 echo "Installing ComfyUI custom nodes..."
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/dsigmabcn/comfyui-model-downloader.git
