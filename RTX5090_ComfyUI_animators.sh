@@ -19,9 +19,6 @@
 #   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_ComfyUI_animators.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
 #
 # Manual model drops still required for football.json:
-#   /workspace/ComfyUI/models/diffusion_models/Wan2.2/Wan2.2_T2V_High_Noise_14B_VACE-Q8_0.gguf
-#   /workspace/ComfyUI/models/diffusion_models/Wan2.2/Wan2.2_T2V_Low_Noise_14B_VACE-Q8_0.gguf
-#   /workspace/ComfyUI/models/text_encoders/umt5-xxl-encoder-Q8_0.gguf
 #   /workspace/ComfyUI/models/loras/art1fact_pod_wan.safetensors
 #   /workspace/ComfyUI/models/loras/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank128_bf16.safetensors
 #   /workspace/ComfyUI/models/loras/gl1der_spaceship_wan_000002700.safetensors
@@ -41,8 +38,25 @@ VENV_BIN="$COMFYUI_DIR/venv/bin"
 FB_DB="/workspace/.filebrowser.db"
 AUTO_DOWNLOAD_KNOWN_MODELS="${AUTO_DOWNLOAD_KNOWN_MODELS:-1}"
 INSTALL_LTX_VIDEO="${INSTALL_LTX_VIDEO:-0}"
+FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
+REBUILD_VENV_ON_BOOT="${REBUILD_VENV_ON_BOOT:-0}"
+UPDATE_CUSTOM_NODES_ON_BOOT="${UPDATE_CUSTOM_NODES_ON_BOOT:-0}"
+REINSTALL_NODE_DEPS_ON_BOOT="${REINSTALL_NODE_DEPS_ON_BOOT:-0}"
+
+existing_install_ready() {
+    [ -d "$COMFYUI_DIR" ] && [ -f /workspace/run_gpu.sh ] && [ -x "$VENV_BIN/python" ]
+}
 
 install_os_packages() {
+    if command -v ffmpeg >/dev/null 2>&1 \
+        && command -v git >/dev/null 2>&1 \
+        && command -v wget >/dev/null 2>&1 \
+        && command -v curl >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1; then
+        echo "Required OS packages already available, skipping apt install."
+        return
+    fi
+
     echo "Installing OS packages..."
     apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg git wget curl python3 python3-venv libgl1 libglib2.0-0 \
@@ -73,6 +87,11 @@ install_comfyui() {
 }
 
 rebuild_venv() {
+    if [ "$REBUILD_VENV_ON_BOOT" != "1" ] && [ -x "$VENV_BIN/python" ]; then
+        echo "ComfyUI venv already present, skipping rebuild."
+        return
+    fi
+
     echo "Recreating ComfyUI venv with system-site-packages..."
     rm -rf "$COMFYUI_DIR/venv"
     python3 -m venv --system-site-packages "$COMFYUI_DIR/venv"
@@ -93,26 +112,54 @@ install_node_repo() {
     local repo_url="$1"
     local dir_name="$2"
     local repo_dir="$CUSTOM_NODES_DIR/$dir_name"
+    local should_install_deps="0"
 
     if [ -d "$repo_dir/.git" ]; then
-        echo "Updating $dir_name..."
-        git -C "$repo_dir" pull --ff-only || true
+        if [ "$UPDATE_CUSTOM_NODES_ON_BOOT" = "1" ]; then
+            echo "Updating $dir_name..."
+            git -C "$repo_dir" pull --ff-only || true
+            should_install_deps="1"
+        else
+            echo "$dir_name already present, skipping git update."
+        fi
     elif [ -d "$repo_dir" ]; then
         echo "Directory $dir_name already exists and is not a git repo, leaving as-is."
     else
         echo "Cloning $dir_name..."
         git -C "$CUSTOM_NODES_DIR" clone "$repo_url" "$dir_name"
+        should_install_deps="1"
     fi
 
     if [ -f "$repo_dir/requirements.txt" ]; then
-        echo "Installing Python requirements for $dir_name..."
-        "$VENV_BIN/pip" install -r "$repo_dir/requirements.txt"
+        if [ "$should_install_deps" = "1" ] || [ "$REINSTALL_NODE_DEPS_ON_BOOT" = "1" ]; then
+            echo "Installing Python requirements for $dir_name..."
+            "$VENV_BIN/pip" install -r "$repo_dir/requirements.txt"
+        else
+            echo "Python requirements for $dir_name already installed, skipping."
+        fi
     fi
 
     if [ -f "$repo_dir/install.py" ]; then
-        echo "Running install.py for $dir_name..."
-        "$VENV_BIN/python" "$repo_dir/install.py" || true
+        if [ "$should_install_deps" = "1" ] || [ "$REINSTALL_NODE_DEPS_ON_BOOT" = "1" ]; then
+            echo "Running install.py for $dir_name..."
+            "$VENV_BIN/python" "$repo_dir/install.py" || true
+        else
+            echo "install.py for $dir_name already handled, skipping."
+        fi
     fi
+}
+
+download_if_missing() {
+    local url="$1"
+    local dest="$2"
+
+    if [ -f "$dest" ]; then
+        echo "Already present: $(basename "$dest")"
+        return
+    fi
+
+    echo "Downloading $(basename "$dest")..."
+    wget -q --show-progress "$url" -O "$dest"
 }
 
 install_custom_nodes() {
@@ -131,9 +178,9 @@ install_custom_nodes() {
     install_node_repo "https://github.com/yolain/ComfyUI-Easy-Use.git" "ComfyUI-Easy-Use"
     install_node_repo "https://github.com/cubiq/ComfyUI_essentials.git" "ComfyUI_essentials"
     install_node_repo "https://github.com/sipherxyz/comfyui-art-venture.git" "comfyui-art-venture"
-    install_node_repo "https://github.com/city96/ComfyUI-GGUF.git" "ComfyUI-GGUF"
+    install_node_repo "https://github.com/calcuis/gguf.git" "gguf"
     install_node_repo "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git" "ComfyUI-Custom-Scripts"
-    install_node_repo "https://github.com/alexopus/ComfyUI-Image-Saver.git" "ComfyUI-Image-Saver"
+    install_node_repo "https://github.com/giriss/comfy-image-saver.git" "comfy-image-saver"
     install_node_repo "https://github.com/rgthree/rgthree-comfy.git" "rgthree-comfy"
 
     # Optional extra support for future animator workflows.
@@ -162,21 +209,27 @@ download_known_models() {
         return
     fi
 
-    if [ ! -f "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors" ]; then
-        echo "Downloading known WAN VAE..."
-        wget -q \
-            "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors" \
-            -O "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors"
-    fi
+    download_if_missing \
+        "https://huggingface.co/lym00/Wan2.2_T2V_A14B_VACE-test/resolve/main/Wan2.2_T2V_High_Noise_14B_VACE-Q8_0.gguf" \
+        "$COMFYUI_DIR/models/diffusion_models/Wan2.2/Wan2.2_T2V_High_Noise_14B_VACE-Q8_0.gguf"
+
+    download_if_missing \
+        "https://huggingface.co/lym00/Wan2.2_T2V_A14B_VACE-test/resolve/main/Wan2.2_T2V_Low_Noise_14B_VACE-Q8_0.gguf" \
+        "$COMFYUI_DIR/models/diffusion_models/Wan2.2/Wan2.2_T2V_Low_Noise_14B_VACE-Q8_0.gguf"
+
+    download_if_missing \
+        "https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q8_0.gguf" \
+        "$COMFYUI_DIR/models/text_encoders/umt5-xxl-encoder-Q8_0.gguf"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors" \
+        "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors"
 }
 
 print_manual_requirements() {
     echo "========================================"
     echo "Manual model files still required"
     echo "========================================"
-    echo "diffusion_models/Wan2.2/Wan2.2_T2V_High_Noise_14B_VACE-Q8_0.gguf"
-    echo "diffusion_models/Wan2.2/Wan2.2_T2V_Low_Noise_14B_VACE-Q8_0.gguf"
-    echo "text_encoders/umt5-xxl-encoder-Q8_0.gguf"
     echo "loras/art1fact_pod_wan.safetensors"
     echo "loras/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank128_bf16.safetensors"
     echo "loras/gl1der_spaceship_wan_000002700.safetensors"
@@ -207,6 +260,20 @@ start_services() {
 
 install_os_packages
 ensure_filebrowser
+
+if [ "$FORCE_FULL_INSTALL" = "1" ]; then
+    echo "FORCE_FULL_INSTALL=1, running full setup."
+elif existing_install_ready; then
+    echo "Existing ComfyUI install detected, using fast start path."
+    prepare_model_layout
+    download_known_models
+    print_manual_requirements
+    configure_filebrowser
+    cleanup
+    start_services
+    exit 0
+fi
+
 install_comfyui
 rebuild_venv
 install_custom_nodes
