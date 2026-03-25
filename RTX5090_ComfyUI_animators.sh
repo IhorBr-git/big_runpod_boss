@@ -42,9 +42,17 @@ FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
 REBUILD_VENV_ON_BOOT="${REBUILD_VENV_ON_BOOT:-0}"
 UPDATE_CUSTOM_NODES_ON_BOOT="${UPDATE_CUSTOM_NODES_ON_BOOT:-0}"
 REINSTALL_NODE_DEPS_ON_BOOT="${REINSTALL_NODE_DEPS_ON_BOOT:-0}"
+CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
+LENOVO_ULTRAREAL_WAN_URL="${LENOVO_ULTRAREAL_WAN_URL:-}"
+MANUAL_ACTIONS=()
 
 existing_install_ready() {
     [ -d "$COMFYUI_DIR" ] && [ -f /workspace/run_gpu.sh ] && [ -x "$VENV_BIN/python" ]
+}
+
+note_manual_action() {
+    local message="$1"
+    MANUAL_ACTIONS+=("$message")
 }
 
 install_os_packages() {
@@ -152,6 +160,7 @@ install_node_repo() {
 download_if_missing() {
     local url="$1"
     local dest="$2"
+    local tmp_dest="${dest}.part"
 
     if [ -f "$dest" ]; then
         echo "Already present: $(basename "$dest")"
@@ -159,7 +168,37 @@ download_if_missing() {
     fi
 
     echo "Downloading $(basename "$dest")..."
-    wget -q --show-progress "$url" -O "$dest"
+    rm -f "$tmp_dest"
+    if ! wget -q --show-progress --tries=3 --waitretry=5 --retry-connrefused "$url" -O "$tmp_dest"; then
+        rm -f "$tmp_dest"
+        return 1
+    fi
+    mv "$tmp_dest" "$dest"
+}
+
+download_civitai_if_missing() {
+    local model_version_id="$1"
+    local dest="$2"
+    local url="${LENOVO_ULTRAREAL_WAN_URL:-https://civitai.com/api/download/models/$model_version_id}"
+
+    if [ -f "$dest" ]; then
+        echo "Already present: $(basename "$dest")"
+        return
+    fi
+
+    if [ -n "$CIVITAI_TOKEN" ]; then
+        if [[ "$url" == *\?* ]]; then
+            url="${url}&token=${CIVITAI_TOKEN}"
+        else
+            url="${url}?token=${CIVITAI_TOKEN}"
+        fi
+    fi
+
+    echo "Downloading $(basename "$dest") from Civitai..."
+    if ! download_if_missing "$url" "$dest"; then
+        rm -f "$dest" "${dest}.part"
+        note_manual_action "Download Lenovo UltraReal Wan LoRA manually to $COMFYUI_DIR/models/loras/Lenovo_UltraReal_v1.0_Wan.safetensors, or rerun with CIVITAI_TOKEN set or LENOVO_ULTRAREAL_WAN_URL pointing at a direct download URL."
+    fi
 }
 
 install_custom_nodes() {
@@ -182,6 +221,12 @@ install_custom_nodes() {
     install_node_repo "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git" "ComfyUI-Custom-Scripts"
     install_node_repo "https://github.com/giriss/comfy-image-saver.git" "comfy-image-saver"
     install_node_repo "https://github.com/rgthree/rgthree-comfy.git" "rgthree-comfy"
+    install_node_repo "https://github.com/mickmumpitz/ComfyUI-Mickmumpitz-Nodes.git" "ComfyUI-Mickmumpitz-Nodes"
+    install_node_repo "https://github.com/PozzettiAndrea/ComfyUI-DepthAnythingV3.git" "ComfyUI-DepthAnythingV3"
+    install_node_repo "https://github.com/Fannovel16/comfyui_controlnet_aux.git" "comfyui_controlnet_aux"
+    install_node_repo "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git" "ComfyUI-Impact-Pack"
+    install_node_repo "https://github.com/ClownsharkBatwing/RES4LYF.git" "RES4LYF"
+    install_node_repo "https://github.com/drozbay/ComfyUI-WanVaceAdvanced.git" "ComfyUI-WanVaceAdvanced"
 
     # Optional extra support for future animator workflows.
     if [ "$INSTALL_LTX_VIDEO" = "1" ]; then
@@ -198,6 +243,8 @@ prepare_model_layout() {
         "$COMFYUI_DIR/input" \
         "$COMFYUI_DIR/output" \
         "$COMFYUI_DIR/models/diffusion_models/Wan2.2" \
+        "$COMFYUI_DIR/models/diffusion_models" \
+        "$COMFYUI_DIR/models/model_patches" \
         "$COMFYUI_DIR/models/text_encoders" \
         "$COMFYUI_DIR/models/vae" \
         "$COMFYUI_DIR/models/loras"
@@ -224,6 +271,42 @@ download_known_models() {
     download_if_missing \
         "https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors" \
         "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors" \
+        "$COMFYUI_DIR/models/text_encoders/qwen_3_4b.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors" \
+        "$COMFYUI_DIR/models/diffusion_models/z_image_turbo_bf16.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors" \
+        "$COMFYUI_DIR/models/vae/ae.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union-2.1/resolve/main/Z-Image-Turbo-Fun-Controlnet-Union-2.1-2601-8steps.safetensors" \
+        "$COMFYUI_DIR/models/model_patches/Z-Image-Fun-Controlnet-Union-2.1.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Inner-Reflections/VACE_Skyreels_V3_R2V_Merge/resolve/main/wan-14B_vace_skyreels_v3_R2V_e4m3fn_v1.safetensors" \
+        "$COMFYUI_DIR/models/diffusion_models/wan-14B_vace_skyreels_v3_R2V_e4m3fn_v1.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/vrgamedevgirl84/Wan14BT2VFusioniX/resolve/main/FusionX_LoRa/Wan2.1_T2V_14B_FusionX_LoRA.safetensors" \
+        "$COMFYUI_DIR/models/loras/Wan2.1_T2V_14B_FusionX_LoRA.safetensors"
+
+    download_civitai_if_missing \
+        "2066914" \
+        "$COMFYUI_DIR/models/loras/Lenovo_UltraReal_v1.0_Wan.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors" \
+        "$COMFYUI_DIR/models/text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors"
+
+    download_if_missing \
+        "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors" \
+        "$COMFYUI_DIR/models/vae/wan_2.1_vae.safetensors"
 }
 
 print_manual_requirements() {
@@ -236,6 +319,13 @@ print_manual_requirements() {
     echo
     echo "Optional workflow input files for football.json belong in:"
     echo "$COMFYUI_DIR/input"
+    if [ ${#MANUAL_ACTIONS[@]} -gt 0 ]; then
+        echo
+        echo "Additional follow-up actions:"
+        for action in "${MANUAL_ACTIONS[@]}"; do
+            echo "$action"
+        done
+    fi
     echo "========================================"
 }
 
