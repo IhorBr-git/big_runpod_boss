@@ -296,6 +296,10 @@ download_known_models() {
         "https://huggingface.co/vrgamedevgirl84/Wan14BT2VFusioniX/resolve/main/FusionX_LoRa/Wan2.1_T2V_14B_FusionX_LoRA.safetensors" \
         "$COMFYUI_DIR/models/loras/Wan2.1_T2V_14B_FusionX_LoRA.safetensors"
 
+    download_if_missing \
+        "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors" \
+        "$COMFYUI_DIR/models/loras/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors"
+
     download_civitai_if_missing \
         "2066914" \
         "$COMFYUI_DIR/models/loras/Lenovo_UltraReal_v1.0_Wan.safetensors"
