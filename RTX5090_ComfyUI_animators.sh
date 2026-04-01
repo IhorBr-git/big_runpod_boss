@@ -42,6 +42,7 @@ FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
 REBUILD_VENV_ON_BOOT="${REBUILD_VENV_ON_BOOT:-0}"
 UPDATE_CUSTOM_NODES_ON_BOOT="${UPDATE_CUSTOM_NODES_ON_BOOT:-0}"
 REINSTALL_NODE_DEPS_ON_BOOT="${REINSTALL_NODE_DEPS_ON_BOOT:-0}"
+CUDA_WHL_INDEX_URL="${CUDA_WHL_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"
 LENOVO_ULTRAREAL_WAN_URL="${LENOVO_ULTRAREAL_WAN_URL:-}"
 MANUAL_ACTIONS=()
@@ -53,6 +54,87 @@ existing_install_ready() {
 note_manual_action() {
     local message="$1"
     MANUAL_ACTIONS+=("$message")
+}
+
+install_requirements_preserving_cuda_stack() {
+    local requirements_file="$1"
+    local filtered_file
+    filtered_file="$(mktemp)"
+
+    # Keep the pod's CUDA 12.8-compatible acceleration stack. Some custom nodes
+    # ask pip for newer torch/xformers/triton wheels, which breaks on drivers
+    # that only expose CUDA 12.8 (reported by torch as version 12080).
+    grep -v -E '^\s*(torch|torchvision|torchaudio|xformers|triton)\s*($|[><=!~;#])' "$requirements_file" > "$filtered_file"
+
+    if [ -s "$filtered_file" ]; then
+        "$VENV_BIN/pip" install -r "$filtered_file"
+    else
+        echo "No non-CUDA Python requirements left in $(basename "$requirements_file"), skipping pip install."
+    fi
+
+    rm -f "$filtered_file"
+}
+
+venv_cuda_stack_is_compatible() {
+    "$VENV_BIN/python" - <<'PY'
+import inspect
+import pathlib
+import sys
+
+try:
+    import torch
+except Exception as exc:
+    print(f"Failed to import torch from the ComfyUI venv: {exc}")
+    raise SystemExit(1)
+
+torch_path = pathlib.Path(inspect.getfile(torch)).resolve()
+cuda_version = getattr(torch.version, "cuda", "") or ""
+
+print(f"Detected torch: {torch.__version__}")
+print(f"Detected torch CUDA runtime: {cuda_version or 'none'}")
+print(f"Detected torch path: {torch_path}")
+
+if not cuda_version.startswith("12.8"):
+    raise SystemExit(1)
+PY
+}
+
+repair_cuda_stack() {
+    local base_packages=()
+
+    echo "Repairing the ComfyUI CUDA stack to stay on CUDA 12.8-compatible wheels..."
+
+    mapfile -t base_packages < <(python3 - <<'PY'
+import importlib.metadata as md
+
+for name in ("torch", "torchvision", "torchaudio"):
+    try:
+        print(f"{name}=={md.version(name)}")
+    except md.PackageNotFoundError:
+        pass
+PY
+)
+
+    if [ ${#base_packages[@]} -eq 0 ]; then
+        echo "Could not determine the base image PyTorch versions."
+        return 1
+    fi
+
+    # Remove optional accelerator wheels that commonly pull in a newer CUDA toolchain.
+    "$VENV_BIN/pip" uninstall -y xformers triton >/dev/null 2>&1 || true
+
+    "$VENV_BIN/pip" install --upgrade --index-url "$CUDA_WHL_INDEX_URL" "${base_packages[@]}"
+}
+
+ensure_compatible_cuda_stack() {
+    if venv_cuda_stack_is_compatible; then
+        echo "ComfyUI torch stack is already CUDA 12.8-compatible."
+        return 0
+    fi
+
+    echo "Detected an incompatible ComfyUI torch stack; repairing it now..."
+    repair_cuda_stack
+    venv_cuda_stack_is_compatible
 }
 
 install_os_packages() {
@@ -107,9 +189,7 @@ rebuild_venv() {
     "$VENV_BIN/pip" install --upgrade pip wheel
 
     echo "Installing ComfyUI requirements while keeping base-image torch..."
-    grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' "$COMFYUI_DIR/requirements.txt" \
-        > /tmp/comfyui_reqs_filtered.txt
-    "$VENV_BIN/pip" install -r /tmp/comfyui_reqs_filtered.txt
+    install_requirements_preserving_cuda_stack "$COMFYUI_DIR/requirements.txt"
 
     if [ -f "$CUSTOM_NODES_DIR/comfyui-manager/requirements.txt" ]; then
         "$VENV_BIN/pip" install -r "$CUSTOM_NODES_DIR/comfyui-manager/requirements.txt"
@@ -141,7 +221,7 @@ install_node_repo() {
     if [ -f "$repo_dir/requirements.txt" ]; then
         if [ "$should_install_deps" = "1" ] || [ "$REINSTALL_NODE_DEPS_ON_BOOT" = "1" ]; then
             echo "Installing Python requirements for $dir_name..."
-            "$VENV_BIN/pip" install -r "$repo_dir/requirements.txt"
+            install_requirements_preserving_cuda_stack "$repo_dir/requirements.txt"
         else
             echo "Python requirements for $dir_name already installed, skipping."
         fi
@@ -232,6 +312,8 @@ install_custom_nodes() {
     if [ "$INSTALL_LTX_VIDEO" = "1" ]; then
         install_node_repo "https://github.com/Lightricks/ComfyUI-LTXVideo.git" "ComfyUI-LTXVideo"
     fi
+
+    ensure_compatible_cuda_stack
 
     echo "NOTE: If the workflow still reports a missing 'Use Everywhere' node pack,"
     echo "install it manually through ComfyUI Manager after first boot."
@@ -359,6 +441,14 @@ if [ "$FORCE_FULL_INSTALL" = "1" ]; then
     echo "FORCE_FULL_INSTALL=1, running full setup."
 elif existing_install_ready; then
     echo "Existing ComfyUI install detected, using fast start path."
+    if ! ensure_compatible_cuda_stack; then
+        echo "Fast start compatibility repair failed; rebuilding the ComfyUI venv."
+        REBUILD_VENV_ON_BOOT="1"
+        REINSTALL_NODE_DEPS_ON_BOOT="1"
+        rebuild_venv
+        install_custom_nodes
+        ensure_compatible_cuda_stack
+    fi
     prepare_model_layout
     download_known_models
     print_manual_requirements
