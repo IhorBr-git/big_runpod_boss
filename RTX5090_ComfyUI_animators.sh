@@ -75,6 +75,19 @@ install_requirements_preserving_cuda_stack() {
     rm -f "$filtered_file"
 }
 
+ensure_python_module() {
+    local import_name="$1"
+    shift
+
+    if "$VENV_BIN/python" -c "import ${import_name}" >/dev/null 2>&1; then
+        echo "Python module ${import_name} already available, skipping."
+        return
+    fi
+
+    echo "Installing Python module ${import_name}..."
+    "$VENV_BIN/pip" install "$@"
+}
+
 venv_cuda_stack_is_compatible() {
     "$VENV_BIN/python" - <<'PY'
 import inspect
@@ -304,6 +317,9 @@ install_custom_nodes() {
     install_node_repo "https://github.com/mickmumpitz/ComfyUI-Mickmumpitz-Nodes.git" "ComfyUI-Mickmumpitz-Nodes"
     install_node_repo "https://github.com/PozzettiAndrea/ComfyUI-DepthAnythingV3.git" "ComfyUI-DepthAnythingV3"
     install_node_repo "https://github.com/Fannovel16/comfyui_controlnet_aux.git" "comfyui_controlnet_aux"
+    install_node_repo "https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet.git" "ComfyUI-Advanced-ControlNet"
+    install_node_repo "https://github.com/Kosinkadink/ComfyUI-AnimateDiff-Evolved.git" "ComfyUI-AnimateDiff-Evolved"
+    install_node_repo "https://github.com/cubiq/ComfyUI_IPAdapter_plus.git" "ComfyUI_IPAdapter_plus"
     install_node_repo "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git" "ComfyUI-Impact-Pack"
     install_node_repo "https://github.com/ClownsharkBatwing/RES4LYF.git" "RES4LYF"
     install_node_repo "https://github.com/drozbay/ComfyUI-WanVaceAdvanced.git" "ComfyUI-WanVaceAdvanced"
@@ -312,6 +328,11 @@ install_custom_nodes() {
     if [ "$INSTALL_LTX_VIDEO" = "1" ]; then
         install_node_repo "https://github.com/Lightricks/ComfyUI-LTXVideo.git" "ComfyUI-LTXVideo"
     fi
+
+    # Keep these optional Python extras explicit so rerunning the script can
+    # repair existing installs that are missing them.
+    ensure_python_module "onnx" "onnx"
+    ensure_python_module "sageattention" "--no-deps" "sageattention"
 
     ensure_compatible_cuda_stack
 
@@ -446,9 +467,8 @@ elif existing_install_ready; then
         REBUILD_VENV_ON_BOOT="1"
         REINSTALL_NODE_DEPS_ON_BOOT="1"
         rebuild_venv
-        install_custom_nodes
-        ensure_compatible_cuda_stack
     fi
+    install_custom_nodes
     prepare_model_layout
     download_known_models
     print_manual_requirements
