@@ -13,7 +13,7 @@
 # entirely and goes straight to starting services.
 #
 # Recommended RunPod bootstrap:
-#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/start_RTX5090_combined_2.sh -O start_RTX5090_combined_2.sh && chmod +x start_RTX5090_combined_2.sh && ./start_RTX5090_combined_2.sh'
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_RTX5090_combined_2.sh -O start_RTX5090_combined_2.sh && chmod +x start_RTX5090_combined_2.sh && ./start_RTX5090_combined_2.sh'
 
 set -e
 

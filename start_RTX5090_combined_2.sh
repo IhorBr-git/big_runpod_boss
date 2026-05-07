@@ -4,7 +4,7 @@ set -euo pipefail
 
 cd /workspace
 
-SCRIPT_URL="https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined_2.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/RTX5090_combined_2.sh"
 SCRIPT_PATH="/workspace/RTX5090_combined_2.sh"
 
 rm -f "$SCRIPT_PATH"
