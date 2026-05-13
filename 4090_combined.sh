@@ -169,8 +169,10 @@ fi
 # then see "driver is too old". Reinstall cu124 once CUDA is still unavailable.
 if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
 if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-echo "ComfyUI: CUDA not available with current PyTorch wheels; aligning to cu124..."
-"$COMFYUI_DIR/venv/bin/pip" install -q --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+echo "ComfyUI: CUDA not available; pinning PyTorch 2.4.0+cu124 (matches base image; latest cu124 wheels need newer drivers)..."
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==2.4.0" "torchvision==0.19.0" "torchaudio==2.4.0" \
+  --index-url https://download.pytorch.org/whl/cu124
 fi
 fi
 
@@ -299,12 +301,14 @@ else
 echo "ComfyUI already exists, skipping installation."
 fi
 
-# Align ComfyUI PyTorch with CUDA 12.4 wheels (matches this template's base image).
-# cu130 requires a host driver with CUDA 13.0+; many RunPod nodes still report 12.x
-# and then torch fails at init with "The NVIDIA driver on your system is too old".
-# If your provider guarantees CUDA 13.0+ drivers, you may switch this index to cu130.
-echo "Upgrading ComfyUI PyTorch to cu124 (compatible with CUDA 12.4 base / common RunPod drivers)..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+# Pin ComfyUI PyTorch to 2.4.0 + cu124 (same era as base image runpod/pytorch:2.4.0-cuda12.4).
+# `pip install --upgrade torch` from the cu124 index pulls the newest torch, whose bundled
+# CUDA still errors on some RunPod hosts ("driver too old", e.g. user-mode 12070).
+# For CUDA 13.0+ hosts and newest kernels, bump these pins after checking pytorch.org.
+echo "Installing ComfyUI PyTorch 2.4.0+cu124 (pinned for older RunPod NVIDIA drivers)..."
+"$COMFYUI_DIR/venv/bin/pip" install \
+  "torch==2.4.0" "torchvision==0.19.0" "torchaudio==2.4.0" \
+  --index-url https://download.pytorch.org/whl/cu124
 
 # ==============================================================================
 # 4. Shared models directory
