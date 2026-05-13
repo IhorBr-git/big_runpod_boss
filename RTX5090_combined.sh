@@ -160,6 +160,48 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
+# Remove half-renamed pip dirs (e.g. ~umpy) in A1111 venv after interrupted installs.
+WEBUI_SITE="$WEBUI_DIR/venv/lib/python3.11/site-packages"
+if [ -d "$WEBUI_SITE" ]; then
+shopt -s nullglob
+for _bad in "$WEBUI_SITE"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+fi
+
+# typing_extensions in venv (TypeIs for gradio/altair) when using --system-site-packages
+"$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
+  || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
+
+# ComfyUI venv: drop dangling ~orch-* / ~* from failed torch upgrades (see uv/pip warnings).
+COMFY_SITE="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+if [ -d "$COMFY_SITE" ]; then
+shopt -s nullglob
+for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+fi
+
+# Self-heal ComfyUI PyTorch: partial cu130/cu128 upgrades leave torch without libs (libtorch_global_deps.so).
+if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
+if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch" 2>/dev/null; then
+echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==2.8.0+cu128..."
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
+rm -rf "$COMFY_SITE"/torch "$COMFY_SITE"/torch.lib "$COMFY_SITE"/functorch \
+  "$COMFY_SITE"/torchvision "$COMFY_SITE"/torchaudio \
+  "$COMFY_SITE"/torch-*.dist-info "$COMFY_SITE"/torchvision-*.dist-info "$COMFY_SITE"/torchaudio-*.dist-info
+shopt -s nullglob
+for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+  --index-url https://download.pytorch.org/whl/cu128
+elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+echo "ComfyUI: CUDA not available; pinning PyTorch 2.8.0+cu128 to match base image..."
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+  --index-url https://download.pytorch.org/whl/cu128
+fi
+fi
+
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
 
@@ -237,6 +279,7 @@ echo "Installing build dependencies in A1111 venv..."
 "$WEBUI_DIR/venv/bin/pip" install --upgrade pip wheel
 # Pin setuptools to 69.5.1 — newer versions break pkg_resources imports needed by CLIP
 "$WEBUI_DIR/venv/bin/pip" install "setuptools==69.5.1"
+"$WEBUI_DIR/venv/bin/pip" install "typing_extensions>=4.12.2"
 
 # ---- Pre-install CLIP without dependencies (torch is already in base image) ----
 echo "Pre-installing CLIP..."
@@ -287,14 +330,14 @@ else
 echo "ComfyUI already exists, skipping installation."
 fi
 
-# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
-# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
-# compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
-# NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
-# driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
-# Once RunPod updates their drivers to CUDA 13.0+, switch this to cu130.
-echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# Pin PyTorch 2.8.0 + cu128 (same generation as base image runpod/pytorch:2.8.0-cuda12.8).
+# Unpinned `pip install --upgrade torch` can pull 2.10+cu130 and, if interrupted, leave
+# dangling ~orch-*.dist-info and a broken torch (libtorch_global_deps.so missing).
+# For CUDA 13.0+ hosts only, consider newer pins after checking pytorch.org.
+echo "Installing ComfyUI PyTorch 2.8.0+cu128 (pinned)..."
+"$COMFYUI_DIR/venv/bin/pip" install \
+  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+  --index-url https://download.pytorch.org/whl/cu128
 
 # ==============================================================================
 # 4. Shared models directory
@@ -390,3 +433,5 @@ rm -f /workspace/install_script.sh
 
 # ==============================================================================
 # 7. Start all services
+# ==============================================================================
+start_services
