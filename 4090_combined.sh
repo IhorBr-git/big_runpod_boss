@@ -160,8 +160,19 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
-# Ensure typing_extensions is up-to-date in A1111 venv (system copy may be too old for gradio/altair)
-"$WEBUI_DIR/venv/bin/pip" install --upgrade typing_extensions > /dev/null 2>&1 || true
+# Force a venv-local typing_extensions (TypeIs for gradio/altair); system-site-packages
+# otherwise resolves /usr/local/.../typing_extensions.py which is often too old.
+"$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
+  || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
+
+# Self-heal: older revisions installed PyTorch cu130; hosts with CUDA 12.x drivers
+# then see "driver is too old". Reinstall cu124 once CUDA is still unavailable.
+if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
+if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+echo "ComfyUI: CUDA not available with current PyTorch wheels; aligning to cu124..."
+"$COMFYUI_DIR/venv/bin/pip" install -q --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+fi
+fi
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -237,6 +248,7 @@ echo "Installing build dependencies in A1111 venv..."
 "$WEBUI_DIR/venv/bin/pip" install --upgrade pip wheel
 # Pin setuptools to 69.5.1 — newer versions break pkg_resources imports needed by CLIP
 "$WEBUI_DIR/venv/bin/pip" install "setuptools==69.5.1"
+"$WEBUI_DIR/venv/bin/pip" install "typing_extensions>=4.12.2"
 
 # ---- Pre-install CLIP without dependencies (torch is already in base image) ----
 echo "Pre-installing CLIP..."
@@ -287,12 +299,12 @@ else
 echo "ComfyUI already exists, skipping installation."
 fi
 
-# Upgrade ComfyUI's PyTorch to cu130 for optimized CUDA/Triton backends.
-# RunPod hosts now ship driver 580+ (CUDA 13.0). cu130 wheels unlock
-# comfy_kitchen cuda & triton backends on RTX 4090 (Ada Lovelace).
-# A1111 keeps its own venv on the base image's older torch — unaffected.
-echo "Upgrading ComfyUI's PyTorch to cu130 for optimized CUDA operations..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# Align ComfyUI PyTorch with CUDA 12.4 wheels (matches this template's base image).
+# cu130 requires a host driver with CUDA 13.0+; many RunPod nodes still report 12.x
+# and then torch fails at init with "The NVIDIA driver on your system is too old".
+# If your provider guarantees CUDA 13.0+ drivers, you may switch this index to cu130.
+echo "Upgrading ComfyUI PyTorch to cu124 (compatible with CUDA 12.4 base / common RunPod drivers)..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 # ==============================================================================
 # 4. Shared models directory
@@ -389,3 +401,4 @@ rm -f /workspace/install_script.sh
 # ==============================================================================
 # 7. Start all services
 # ==============================================================================
+start_services

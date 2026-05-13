@@ -17,6 +17,24 @@
 
 cd /workspace
 
+CUDA_WHL_INDEX_URL="https://download.pytorch.org/whl/cu128"
+
+install_requirements_preserving_cuda_stack() {
+tmp_requirements="$(mktemp)"
+
+# Some custom nodes request newer torch/xformers/triton wheels that are not
+# compatible with hosts exposing only CUDA 12.8 (reported as driver 12080).
+grep -v -E '^\s*(torch|torchvision|torchaudio|xformers|triton)\s*($|[><=!~;#])' "$1" > "$tmp_requirements"
+
+if [ -s "$tmp_requirements" ]; then
+    /workspace/ComfyUI/venv/bin/pip install -r "$tmp_requirements"
+else
+    echo "No compatible requirements left in $(basename "$1"), skipping."
+fi
+
+rm -f "$tmp_requirements"
+}
+
 # ---- Install filebrowser if not present ----
 if ! command -v filebrowser &> /dev/null; then
 echo "Installing filebrowser..."
@@ -48,9 +66,7 @@ python3 -m venv --system-site-packages /workspace/ComfyUI/venv
 # pip's dependency resolver would otherwise pull a different torch build
 # that may lack GPU support or be incompatible with the CUDA driver.
 echo "Installing ComfyUI requirements (keeping system torch)..."
-grep -v -E '^\s*(torch|torchvision|torchaudio)\s*($|[><=!~;#])' /workspace/ComfyUI/requirements.txt \
-> /tmp/comfyui_reqs_filtered.txt
-/workspace/ComfyUI/venv/bin/pip install -r /tmp/comfyui_reqs_filtered.txt
+install_requirements_preserving_cuda_stack /workspace/ComfyUI/requirements.txt
 
 # Reinstall comfyui-manager dependencies (lost when the venv was recreated above)
 /workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-manager/requirements.txt
@@ -60,9 +76,13 @@ echo "Installing ComfyUI custom nodes..."
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/dsigmabcn/comfyui-model-downloader.git
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/crystian/ComfyUI-Crystools.git
-/workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/ComfyUI-Crystools/requirements.txt
+install_requirements_preserving_cuda_stack /workspace/ComfyUI/custom_nodes/ComfyUI-Crystools/requirements.txt
 git -C /workspace/ComfyUI/custom_nodes clone https://github.com/stavsap/comfyui-ollama.git
-/workspace/ComfyUI/venv/bin/pip install -r /workspace/ComfyUI/custom_nodes/comfyui-ollama/requirements.txt
+install_requirements_preserving_cuda_stack /workspace/ComfyUI/custom_nodes/comfyui-ollama/requirements.txt
+
+echo "Reinstalling CUDA 12.8-compatible torch stack..."
+/workspace/ComfyUI/venv/bin/pip uninstall -y xformers triton >/dev/null 2>&1 || true
+/workspace/ComfyUI/venv/bin/pip install --upgrade --index-url "$CUDA_WHL_INDEX_URL" torch torchvision torchaudio
 
 # ---- File Browser (configure database) ----
 FB_DB="/workspace/.filebrowser.db"

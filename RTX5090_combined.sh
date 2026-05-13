@@ -160,9 +160,6 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
-# Ensure typing_extensions is up-to-date in A1111 venv (system copy may be too old for gradio/altair)
-"$WEBUI_DIR/venv/bin/pip" install --upgrade typing_extensions > /dev/null 2>&1 || true
-
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
 
@@ -290,12 +287,14 @@ else
 echo "ComfyUI already exists, skipping installation."
 fi
 
-# Upgrade ComfyUI's PyTorch to cu130 for optimized CUDA/Triton backends.
-# RunPod hosts now ship driver 580+ (CUDA 13.0). cu130 wheels unlock
-# comfy_kitchen cuda & triton backends on RTX 5090 (Blackwell).
-# A1111 keeps its own venv on the base image's older torch — unaffected.
-echo "Upgrading ComfyUI's PyTorch to cu130 for optimized CUDA operations..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# Upgrade PyTorch to cu128 to match the pod's CUDA 12.8 driver.
+# The ComfyUI-Manager installer may use the cu121 index — cu128 wheels ensure
+# compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
+# NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
+# driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
+# Once RunPod updates their drivers to CUDA 13.0+, switch this to cu130.
+echo "Upgrading ComfyUI's PyTorch to cu128 for CUDA 12.8 driver compatibility..."
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # ==============================================================================
 # 4. Shared models directory

@@ -384,11 +384,10 @@ fi
 # compatibility with the host driver while still supporting RTX 5090 Blackwell arch.
 # NOTE: cu130 would give optimized Blackwell kernels but RunPod's host NVIDIA
 # driver only reports CUDA 12.8 (version 12080), so cu130 crashes at startup.
-# RunPod hosts now ship driver 580+ (CUDA 13.0). cu130 wheels unlock
-# comfy_kitchen cuda & triton backends on RTX 5090 (Blackwell).
 # A1111 keeps its own venv on the base image's older torch — unaffected.
-echo "Upgrading ComfyUI's PyTorch to cu130 for optimized CUDA operations..."
-"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+echo "Upgrading ComfyUI's PyTorch to cu128 for driver-compatible CUDA operations..."
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y xformers triton >/dev/null 2>&1 || true
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # ==============================================================================
 # 4. Shared models directory
