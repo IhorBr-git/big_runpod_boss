@@ -160,6 +160,15 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
+# Remove half-renamed pip dirs (e.g. ~umpy) after interrupted installs — avoids
+# "Ignoring invalid distribution ~umpy" and flaky resolver behaviour.
+WEBUI_SITE="$WEBUI_DIR/venv/lib/python3.11/site-packages"
+if [ -d "$WEBUI_SITE" ]; then
+shopt -s nullglob
+for _bad in "$WEBUI_SITE"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+fi
+
 # Force a venv-local typing_extensions (TypeIs for gradio/altair); system-site-packages
 # otherwise resolves /usr/local/.../typing_extensions.py which is often too old.
 "$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
