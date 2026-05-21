@@ -13,8 +13,11 @@
 # entirely and goes straight to starting services — same logic as the
 # individual container start commands.
 #
-# Container Start Command (use the script for both fresh install and restart):
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
+# Container Start Command (direct or via GPU auto-detect on test branch):
+#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh
+#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
+#
+# Force full reinstall on a pod with existing /workspace: FORCE_FULL_INSTALL=1 ./install_script.sh
 
 set -e
 
@@ -22,6 +25,80 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
+
+TORCH_VERSION="2.4.0"
+TORCHVISION_VERSION="0.19.0"
+TORCHAUDIO_VERSION="2.4.0"
+TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+
+# ------------------------------------------------------------------------------
+# cleanup_pip_tilde_dirs — remove ~umpy / ~orch-* from interrupted pip installs
+# ------------------------------------------------------------------------------
+cleanup_pip_tilde_dirs() {
+local site_dir="$1"
+[ -d "$site_dir" ] || return 0
+shopt -s nullglob
+for _bad in "$site_dir"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+}
+
+# ------------------------------------------------------------------------------
+# pip_install_filtered_reqs — install requirements without overriding torch stack
+# ------------------------------------------------------------------------------
+pip_install_filtered_reqs() {
+local pip_bin="$1"
+local req_file="$2"
+local filtered
+filtered="$(mktemp)"
+grep -v -E '^\s*(torch|torchvision|torchaudio|xformers|triton)\s*($|[><=!~;#])' "$req_file" > "$filtered"
+if [ -s "$filtered" ]; then
+"$pip_bin" install -r "$filtered"
+fi
+rm -f "$filtered"
+}
+
+# ------------------------------------------------------------------------------
+# setup_comfyui_venv — inherit base-image GPU torch; pin cu124 stack afterward
+# ------------------------------------------------------------------------------
+setup_comfyui_venv() {
+echo "Recreating ComfyUI venv with system-site-packages (GPU-enabled torch)..."
+rm -rf "$COMFYUI_DIR/venv"
+python3.11 -m venv --system-site-packages "$COMFYUI_DIR/venv"
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
+echo "Installing ComfyUI PyTorch ${TORCH_VERSION}+cu124 (pinned)..."
+"$COMFYUI_DIR/venv/bin/pip" install \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+}
+
+# ------------------------------------------------------------------------------
+# ensure_comfyui_torch — self-heal broken or driver-incompatible ComfyUI torch
+# ------------------------------------------------------------------------------
+ensure_comfyui_torch() {
+local comfy_site="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
+
+cleanup_pip_tilde_dirs "$comfy_site"
+
+if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch" 2>/dev/null; then
+echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu124..."
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
+rm -rf "$comfy_site"/torch "$comfy_site"/torch.lib "$comfy_site"/functorch \
+  "$comfy_site"/torchvision "$comfy_site"/torchaudio \
+  "$comfy_site"/torch-*.dist-info "$comfy_site"/torchvision-*.dist-info "$comfy_site"/torchaudio-*.dist-info
+cleanup_pip_tilde_dirs "$comfy_site"
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu124 (matches base image)..."
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+fi
+}
 
 # ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
@@ -160,30 +237,14 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
-# Remove half-renamed pip dirs (e.g. ~umpy) after interrupted installs — avoids
-# "Ignoring invalid distribution ~umpy" and flaky resolver behaviour.
-WEBUI_SITE="$WEBUI_DIR/venv/lib/python3.11/site-packages"
-if [ -d "$WEBUI_SITE" ]; then
-shopt -s nullglob
-for _bad in "$WEBUI_SITE"/~*; do rm -rf "$_bad"; done
-shopt -u nullglob
-fi
+cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 
 # Force a venv-local typing_extensions (TypeIs for gradio/altair); system-site-packages
 # otherwise resolves /usr/local/.../typing_extensions.py which is often too old.
 "$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
   || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
 
-# Self-heal: older revisions installed PyTorch cu130; hosts with CUDA 12.x drivers
-# then see "driver is too old". Reinstall cu124 once CUDA is still unavailable.
-if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
-if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-echo "ComfyUI: CUDA not available; pinning PyTorch 2.4.0+cu124 (matches base image; latest cu124 wheels need newer drivers)..."
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==2.4.0" "torchvision==0.19.0" "torchaudio==2.4.0" \
-  --index-url https://download.pytorch.org/whl/cu124
-fi
-fi
+ensure_comfyui_torch
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -201,9 +262,11 @@ wait
 # ==============================================================================
 # Fast restart: if both are already installed, skip straight to startup
 # ==============================================================================
-if [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
+if [ "$FORCE_FULL_INSTALL" = "1" ]; then
+echo "FORCE_FULL_INSTALL=1, running full setup."
+elif [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
 echo "Both A1111 and ComfyUI already installed. Skipping installation..."
-rm -f /workspace/install_script.sh
+rm -f /workspace/install_script.sh /workspace/start_combined.sh
 start_services
 exit 0
 fi
@@ -246,7 +309,7 @@ export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # xformers is also a good option on RTX 4090 but SDP keeps things simpler
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --theme=dark"
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check --theme=dark"
 EOF
 
 # ---- Pre-create venv inheriting base image packages (torch 2.4.0, torchvision, CUDA 12.4) ----
@@ -302,22 +365,22 @@ echo "Installing ComfyUI custom nodes..."
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/crystian/ComfyUI-Crystools.git
-"$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
+
+# Recreate venv inheriting base-image torch; pin cu124 before node deps
+setup_comfyui_venv
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 
 # Clean up ComfyUI installer artifacts
 rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
 else
 echo "ComfyUI already exists, skipping installation."
+if [ "$FORCE_FULL_INSTALL" = "1" ]; then
+setup_comfyui_venv
+if [ -f "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 fi
-
-# Pin ComfyUI PyTorch to 2.4.0 + cu124 (same era as base image runpod/pytorch:2.4.0-cuda12.4).
-# `pip install --upgrade torch` from the cu124 index pulls the newest torch, whose bundled
-# CUDA still errors on some RunPod hosts ("driver too old", e.g. user-mode 12070).
-# For CUDA 13.0+ hosts and newest kernels, bump these pins after checking pytorch.org.
-echo "Installing ComfyUI PyTorch 2.4.0+cu124 (pinned for older RunPod NVIDIA drivers)..."
-"$COMFYUI_DIR/venv/bin/pip" install \
-  "torch==2.4.0" "torchvision==0.19.0" "torchaudio==2.4.0" \
-  --index-url https://download.pytorch.org/whl/cu124
+fi
+fi
 
 # ==============================================================================
 # 4. Shared models directory
