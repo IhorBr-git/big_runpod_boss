@@ -12,9 +12,9 @@
 # On pod restart (both dirs already exist) the script skips installation
 # entirely and goes straight to starting services.
 #
-# Recommended RunPod bootstrap (GPU auto-detect on test branch):
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/RTX5090_combined_2.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
+# Recommended RunPod bootstrap (must use bash -c on RunPod):
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh'
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/RTX5090_combined_2.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
 #
 # Force full reinstall: FORCE_FULL_INSTALL=1 ./install_script.sh
 
@@ -61,6 +61,18 @@ echo "Installing ComfyUI PyTorch ${TORCH_VERSION}+cu128 (pinned)..."
 "$COMFYUI_DIR/venv/bin/pip" install \
   "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
   --index-url "$TORCH_INDEX_URL"
+}
+
+configure_comfyui_run_gpu() {
+local run_gpu="/workspace/run_gpu.sh"
+[ -f "$run_gpu" ] || return 0
+if ! grep -q -- '--listen' "$run_gpu"; then
+sed -i '$ s/$/ --listen /' "$run_gpu"
+fi
+if ! grep -q -- 'enable-cors-header' "$run_gpu"; then
+sed -i '$ s/$/ --enable-cors-header '"'"'*'"'"' /' "$run_gpu"
+fi
+chmod +x "$run_gpu"
 }
 
 ensure_comfyui_torch() {
@@ -230,6 +242,7 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
   || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
 
 ensure_comfyui_torch
+configure_comfyui_run_gpu
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -343,10 +356,9 @@ wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyu
 chmod +x install-comfyui-venv-linux.sh
 ./install-comfyui-venv-linux.sh
 
-# Add the --listen flag to run_gpu.sh for network access
-echo "Configuring ComfyUI for network access..."
-sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
-chmod +x /workspace/run_gpu.sh
+# RunPod proxy needs --listen and --enable-cors-header (host/origin mismatch → HTTP 403)
+echo "Configuring ComfyUI for RunPod network access..."
+configure_comfyui_run_gpu
 
 # Install custom nodes
 echo "Installing ComfyUI custom nodes..."

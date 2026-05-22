@@ -19,8 +19,8 @@
 #   GPU_PROFILE=blackwell|ada|legacy   skip auto-detection
 #   REPO_BASE=...                      script download base URL (default: test branch)
 #
-# RunPod Start Command:
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh
+# RunPod Container start command (must use bash -c — bare "cd && ..." fails with exec: cd: not found):
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh'
 
 set -euo pipefail
 

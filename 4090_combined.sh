@@ -13,9 +13,9 @@
 # entirely and goes straight to starting services — same logic as the
 # individual container start commands.
 #
-# Container Start Command (direct or via GPU auto-detect on test branch):
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
+# Container Start Command (must use bash -c on RunPod):
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh'
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
 #
 # Force full reinstall on a pod with existing /workspace: FORCE_FULL_INSTALL=1 ./install_script.sh
 
@@ -76,6 +76,18 @@ echo "Installing ComfyUI PyTorch ${TORCH_VERSION}+cu124 (pinned)..."
 # ------------------------------------------------------------------------------
 # ensure_comfyui_torch — self-heal broken or driver-incompatible ComfyUI torch
 # ------------------------------------------------------------------------------
+configure_comfyui_run_gpu() {
+local run_gpu="/workspace/run_gpu.sh"
+[ -f "$run_gpu" ] || return 0
+if ! grep -q -- '--listen' "$run_gpu"; then
+sed -i '$ s/$/ --listen /' "$run_gpu"
+fi
+if ! grep -q -- 'enable-cors-header' "$run_gpu"; then
+sed -i '$ s/$/ --enable-cors-header '"'"'*'"'"' /' "$run_gpu"
+fi
+chmod +x "$run_gpu"
+}
+
 ensure_comfyui_torch() {
 local comfy_site="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
 [ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
@@ -245,6 +257,7 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
   || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
 
 ensure_comfyui_torch
+configure_comfyui_run_gpu
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
@@ -355,10 +368,9 @@ wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyu
 chmod +x install-comfyui-venv-linux.sh
 ./install-comfyui-venv-linux.sh
 
-# Add the --listen flag to run_gpu.sh for network access
-echo "Configuring ComfyUI for network access..."
-sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
-chmod +x /workspace/run_gpu.sh
+# RunPod proxy needs --listen and --enable-cors-header (host/origin mismatch → HTTP 403)
+echo "Configuring ComfyUI for RunPod network access..."
+configure_comfyui_run_gpu
 
 # Install custom nodes
 echo "Installing ComfyUI custom nodes..."
