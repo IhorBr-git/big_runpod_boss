@@ -247,6 +247,12 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 # pair on every boot so a polluted venv can't keep the WebUI from launching.
 "$WEBUI_DIR/venv/bin/pip" install -q "numpy==1.26.2" "scikit-image==0.21.0" \
   || echo "WARNING: numpy/scikit-image pin failed; ControlNet may break A1111 startup"
+# ControlNet runs an unpinned `pip install mediapipe`; recent mediapipe (0.10.31+)
+# dropped the legacy `solutions` API, so controlnet_aux fails to import and the
+# whole ControlNet script silently fails to load (no UI panel). Pin a version
+# that still ships `solutions`.
+"$WEBUI_DIR/venv/bin/pip" install -q "mediapipe==0.10.14" \
+  || echo "WARNING: mediapipe pin failed; ControlNet may not load in the UI"
 
 ensure_comfyui_torch
 configure_comfyui_run_gpu
