@@ -241,6 +241,13 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 "$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
   || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
 
+# ControlNet's installer can leave a numpy/scikit-image combo with mismatched
+# binary ABI (skimage compiled for one numpy major, a different numpy installed),
+# which crashes A1111 at `from skimage import exposure`. Pin the A1111-supported
+# pair on every boot so a polluted venv can't keep the WebUI from launching.
+"$WEBUI_DIR/venv/bin/pip" install -q "numpy==1.26.2" "scikit-image==0.21.0" \
+  || echo "WARNING: numpy/scikit-image pin failed; ControlNet may break A1111 startup"
+
 ensure_comfyui_torch
 configure_comfyui_run_gpu
 
@@ -277,6 +284,7 @@ echo "[1/7] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
 wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+pkg-config libcairo2-dev \
 && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
@@ -340,6 +348,8 @@ git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
 [ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
 git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
+[ ! -d "$WEBUI_DIR/extensions/sd-webui-controlnet" ] && \
+git clone https://github.com/Mikubill/sd-webui-controlnet.git "$WEBUI_DIR/extensions/sd-webui-controlnet" || true
 # ==============================================================================
 # 3. ComfyUI
 # ==============================================================================
