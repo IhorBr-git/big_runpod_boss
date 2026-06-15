@@ -99,6 +99,24 @@ echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu128 to mat
 fi
 }
 
+ensure_comfyui_deps() {
+# On a fast restart the venv is reused as-is. If ComfyUI was updated to a newer
+# checkout that needs packages the old venv lacks (e.g. `filelock` for the new
+# app.database layer), main.py crashes on import before the server ever starts.
+# Probe the imports ComfyUI needs at boot and, only if something is missing,
+# reinstall the filtered requirements so we don't pay for it on a healthy venv.
+[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
+if "$COMFYUI_DIR/venv/bin/python" -c "import filelock, yaml, numpy, torchsde" 2>/dev/null; then
+return 0
+fi
+echo "ComfyUI: missing runtime deps detected; reinstalling requirements..."
+cleanup_pip_tilde_dirs "$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
+}
+
 # ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
 # Called from start_services() so it works on both fresh install and pod restart.
@@ -255,6 +273,7 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
   || echo "WARNING: mediapipe pin failed; ControlNet may not load in the UI"
 
 ensure_comfyui_torch
+ensure_comfyui_deps
 configure_comfyui_run_gpu
 
 # Start A1111 WebUI
@@ -367,10 +386,22 @@ if [ ! -d "$COMFYUI_DIR" ]; then
 echo "Installing ComfyUI and ComfyUI Manager..."
 cd /workspace
 
-# Download and run the ComfyUI-Manager install script
-wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyui-venv-linux.sh -O install-comfyui-venv-linux.sh
-chmod +x install-comfyui-venv-linux.sh
-./install-comfyui-venv-linux.sh
+# NOTE: we deliberately do NOT run the upstream install-comfyui-venv-linux.sh.
+# That installer pip-installs a multi-GB cu130 torch into a throwaway venv,
+# which we immediately wipe and replace with the pinned cu128 build in
+# setup_comfyui_venv — ~10 min of bandwidth burned for nothing. Instead we
+# replicate just its useful side effects (clone + run_gpu.sh) by hand.
+git clone https://github.com/comfyanonymous/ComfyUI "$COMFYUI_DIR"
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/ltdrdata/ComfyUI-Manager comfyui-manager
+
+# Recreate the GPU launcher the upstream installer would have produced.
+cat > /workspace/run_gpu.sh << 'EOF'
+#!/bin/bash
+cd ComfyUI
+source venv/bin/activate
+python main.py --preview-method auto
+EOF
+chmod +x /workspace/run_gpu.sh
 
 # RunPod proxy needs --listen and --enable-cors-header (host/origin mismatch → HTTP 403)
 echo "Configuring ComfyUI for RunPod network access..."
@@ -382,15 +413,21 @@ git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-mo
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/crystian/ComfyUI-Crystools.git
 
+# Build the venv once with the pinned cu128 torch, then layer node requirements
+# on top (setup_comfyui_venv only covers ComfyUI core requirements.txt).
 setup_comfyui_venv
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 
-# Clean up ComfyUI installer artifacts
-rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
+# Clean up any leftover CPU runner from older installs
+rm -f /workspace/run_cpu.sh
 else
 echo "ComfyUI already exists, skipping installation."
 if [ "$FORCE_FULL_INSTALL" = "1" ]; then
 setup_comfyui_venv
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
 if [ -f "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt" ]; then
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 fi
