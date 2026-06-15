@@ -35,7 +35,9 @@ REPO_BASE="${REPO_BASE:-https://raw.githubusercontent.com/IhorBr-git/big_runpod_
 GPU_PROFILE="${GPU_PROFILE:-}"
 
 detect_gpu_profile() {
-local name="${1,,}"
+# Lowercase via tr (portable to bash 3.x; ${name,,} needs bash 4+).
+local name
+name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
 
 # Blackwell — sm_120/sm_100, needs CUDA 12.8 / cu128 (RTX 50-series, RTX PRO, B-series)
 if [[ "$name" =~ (blackwell|gb20|gb200|b200|b300|rtx[[:space:]]*pro[[:space:]]*(4000|4500|6000)|rtx[[:space:]]*50[0-9]{2}|rtx[[:space:]]*5090|rtx[[:space:]]*5080|rtx[[:space:]]*5070|rtx[[:space:]]*5060|rtx[[:space:]]*5050) ]]; then

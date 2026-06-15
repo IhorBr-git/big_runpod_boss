@@ -25,6 +25,7 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+A1111_PIP_CONSTRAINTS="/workspace/a1111-pip-constraints.txt"
 FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
 
 TORCH_VERSION="2.4.0"
@@ -113,6 +114,26 @@ fi
 }
 
 # ------------------------------------------------------------------------------
+# ensure_comfyui_deps — on a fast restart the venv is reused as-is. If ComfyUI
+# was updated to a newer checkout needing packages the old venv lacks (e.g.
+# `filelock` for the new app.database layer), main.py crashes on import before
+# the server starts. Probe the boot imports and reinstall requirements only when
+# something is missing, so a healthy venv pays no cost.
+# ------------------------------------------------------------------------------
+ensure_comfyui_deps() {
+[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
+if "$COMFYUI_DIR/venv/bin/python" -c "import filelock, yaml, numpy, torchsde" 2>/dev/null; then
+return 0
+fi
+echo "ComfyUI: missing runtime deps detected; reinstalling requirements..."
+cleanup_pip_tilde_dirs "$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
+}
+
+# ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
 # Called from start_services() so it works on both fresh install and pod restart.
 # ------------------------------------------------------------------------------
@@ -122,6 +143,8 @@ mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
 mkdir -p "$WEBUI_DIR/extensions/vram-guard/javascript"
 cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
+import threading
+import time
 import torch
 from modules import script_callbacks, shared, sd_models
 
@@ -163,6 +186,33 @@ def _reload_model():
     return _vram_str()
 
 
+def _model_is_loaded():
+    # Read the stored model reference WITHOUT touching shared.sd_model, whose
+    # lazy getter would force a checkpoint load — the opposite of what we want.
+    try:
+        return sd_models.model_data.sd_model is not None
+    except Exception:
+        return False
+
+
+def _boot_unload_worker():
+    # A1111 preloads the checkpoint into VRAM at startup. Wait for that initial
+    # load to land, then unload it once so the pod boots with the full GPU free.
+    # The model is transparently reloaded on the first generation (or via the
+    # Reload button). We never yank VRAM out from under an active job.
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            if getattr(shared.state, "job_count", 0) > 0:
+                continue
+        except Exception:
+            pass
+        if _model_is_loaded():
+            print("[vram-guard] boot unload: " + _unload_all(), flush=True)
+            return
+
+
 def _add_api(_demo, app):
     @app.post("/vram-guard/unload-all")
     async def api_unload_all():
@@ -171,6 +221,9 @@ def _add_api(_demo, app):
     @app.post("/vram-guard/reload")
     async def api_reload():
         return {"vram": _reload_model()}
+
+    # Free VRAM on pod boot by default.
+    threading.Thread(target=_boot_unload_worker, daemon=True).start()
 
 script_callbacks.on_app_started(_add_api)
 PYEOF
@@ -258,22 +311,29 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 
 # ControlNet's installer can leave a numpy/scikit-image combo with mismatched
 # binary ABI (skimage compiled for one numpy major, a different numpy installed),
-# which crashes A1111 at `from skimage import exposure`. Pin the A1111-supported
-# pair on every boot so a polluted venv can't keep the WebUI from launching.
-"$WEBUI_DIR/venv/bin/pip" install -q "numpy==1.26.2" "scikit-image==0.21.0" \
-  || echo "WARNING: numpy/scikit-image pin failed; ControlNet may break A1111 startup"
-# ControlNet runs an unpinned `pip install mediapipe`; recent mediapipe (0.10.31+)
-# dropped the legacy `solutions` API, so controlnet_aux fails to import and the
-# whole ControlNet script silently fails to load (no UI panel). Pin a version
-# that still ships `solutions`.
-"$WEBUI_DIR/venv/bin/pip" install -q "mediapipe==0.10.14" \
-  || echo "WARNING: mediapipe pin failed; ControlNet may not load in the UI"
+# which crashes A1111 at `from skimage import exposure`. Pinning here alone is
+# NOT enough: ControlNet's own pip installs run *during* webui.sh launch (after
+# this point) and pull a numpy-2 build of scikit-image on top of numpy 1.26.2.
+# A pip constraints file (exported as PIP_CONSTRAINT below) forces every pip
+# invocation during A1111 startup — including the extension installers — to keep
+# these versions, so the ABI can't drift. mediapipe is pinned because recent
+# releases (0.10.31+) dropped the legacy `solutions` API controlnet_aux needs.
+cat > "$A1111_PIP_CONSTRAINTS" << 'EOF'
+numpy==1.26.2
+scikit-image==0.21.0
+mediapipe==0.10.14
+EOF
+PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" "$WEBUI_DIR/venv/bin/pip" install -q \
+  "numpy==1.26.2" "scikit-image==0.21.0" "mediapipe==0.10.14" \
+  || echo "WARNING: numpy/scikit-image/mediapipe pin failed; A1111 startup may break"
 
 ensure_comfyui_torch
+ensure_comfyui_deps
 configure_comfyui_run_gpu
 
-# Start A1111 WebUI
-(cd "$WEBUI_DIR" && bash webui.sh -f) &
+# Start A1111 WebUI (constrain every pip install it triggers so ControlNet's
+# extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
+(cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
 # Start ComfyUI
 /workspace/run_gpu.sh &
@@ -379,10 +439,22 @@ if [ ! -d "$COMFYUI_DIR" ]; then
 echo "Installing ComfyUI and ComfyUI Manager..."
 cd /workspace
 
-# Download and run the ComfyUI-Manager install script
-wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyui-venv-linux.sh -O install-comfyui-venv-linux.sh
-chmod +x install-comfyui-venv-linux.sh
-./install-comfyui-venv-linux.sh
+# NOTE: we deliberately do NOT run the upstream install-comfyui-venv-linux.sh.
+# That installer pip-installs a multi-GB torch into a throwaway venv, which we
+# immediately wipe and replace with the pinned cu124 build in setup_comfyui_venv
+# — minutes of bandwidth burned for nothing. Replicate just its useful side
+# effects (clone + run_gpu.sh) by hand instead.
+git clone https://github.com/comfyanonymous/ComfyUI "$COMFYUI_DIR"
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/ltdrdata/ComfyUI-Manager comfyui-manager
+
+# Recreate the GPU launcher the upstream installer would have produced.
+cat > /workspace/run_gpu.sh << 'EOF'
+#!/bin/bash
+cd ComfyUI
+source venv/bin/activate
+python main.py --preview-method auto
+EOF
+chmod +x /workspace/run_gpu.sh
 
 # RunPod proxy needs --listen and --enable-cors-header (host/origin mismatch → HTTP 403)
 echo "Configuring ComfyUI for RunPod network access..."
@@ -396,14 +468,18 @@ git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/crystian/ComfyUI-Cry
 
 # Recreate venv inheriting base-image torch; pin cu124 before node deps
 setup_comfyui_venv
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 
-# Clean up ComfyUI installer artifacts
-rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
+# Clean up any leftover CPU runner from older installs
+rm -f /workspace/run_cpu.sh
 else
 echo "ComfyUI already exists, skipping installation."
 if [ "$FORCE_FULL_INSTALL" = "1" ]; then
 setup_comfyui_venv
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
 if [ -f "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt" ]; then
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 fi
