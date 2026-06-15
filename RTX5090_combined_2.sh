@@ -24,6 +24,7 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+A1111_PIP_CONSTRAINTS="/workspace/a1111-pip-constraints.txt"
 FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
 
 TORCH_VERSION="2.8.0"
@@ -127,6 +128,8 @@ mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
 mkdir -p "$WEBUI_DIR/extensions/vram-guard/javascript"
 cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
+import threading
+import time
 import torch
 from modules import script_callbacks, shared, sd_models
 
@@ -168,6 +171,33 @@ def _reload_model():
     return _vram_str()
 
 
+def _model_is_loaded():
+    # Read the stored model reference WITHOUT touching shared.sd_model, whose
+    # lazy getter would force a checkpoint load — the opposite of what we want.
+    try:
+        return sd_models.model_data.sd_model is not None
+    except Exception:
+        return False
+
+
+def _boot_unload_worker():
+    # A1111 preloads the checkpoint into VRAM at startup. Wait for that initial
+    # load to land, then unload it once so the pod boots with the full GPU free.
+    # The model is transparently reloaded on the first generation (or via the
+    # Reload button). We never yank VRAM out from under an active job.
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            if getattr(shared.state, "job_count", 0) > 0:
+                continue
+        except Exception:
+            pass
+        if _model_is_loaded():
+            print("[vram-guard] boot unload: " + _unload_all(), flush=True)
+            return
+
+
 def _add_api(_demo, app):
     @app.post("/vram-guard/unload-all")
     async def api_unload_all():
@@ -176,6 +206,9 @@ def _add_api(_demo, app):
     @app.post("/vram-guard/reload")
     async def api_reload():
         return {"vram": _reload_model()}
+
+    # Free VRAM on pod boot by default.
+    threading.Thread(target=_boot_unload_worker, daemon=True).start()
 
 script_callbacks.on_app_started(_add_api)
 PYEOF
@@ -261,23 +294,29 @@ cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 
 # ControlNet's installer can leave a numpy/scikit-image combo with mismatched
 # binary ABI (skimage compiled for one numpy major, a different numpy installed),
-# which crashes A1111 at `from skimage import exposure`. Pin the A1111-supported
-# pair on every boot so a polluted venv can't keep the WebUI from launching.
-"$WEBUI_DIR/venv/bin/pip" install -q "numpy==1.26.2" "scikit-image==0.21.0" \
-  || echo "WARNING: numpy/scikit-image pin failed; ControlNet may break A1111 startup"
-# ControlNet runs an unpinned `pip install mediapipe`; recent mediapipe (0.10.31+)
-# dropped the legacy `solutions` API, so controlnet_aux fails to import and the
-# whole ControlNet script silently fails to load (no UI panel). Pin a version
-# that still ships `solutions`.
-"$WEBUI_DIR/venv/bin/pip" install -q "mediapipe==0.10.14" \
-  || echo "WARNING: mediapipe pin failed; ControlNet may not load in the UI"
+# which crashes A1111 at `from skimage import exposure`. Pinning here alone is
+# NOT enough: ControlNet's own pip installs run *during* webui.sh launch (after
+# this point) and pull a numpy-2 build of scikit-image on top of numpy 1.26.2.
+# A pip constraints file (exported as PIP_CONSTRAINT below) forces every pip
+# invocation during A1111 startup — including the extension installers — to keep
+# these versions, so the ABI can't drift. mediapipe is pinned because recent
+# releases (0.10.31+) dropped the legacy `solutions` API controlnet_aux needs.
+cat > "$A1111_PIP_CONSTRAINTS" << 'EOF'
+numpy==1.26.2
+scikit-image==0.21.0
+mediapipe==0.10.14
+EOF
+PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" "$WEBUI_DIR/venv/bin/pip" install -q \
+  "numpy==1.26.2" "scikit-image==0.21.0" "mediapipe==0.10.14" \
+  || echo "WARNING: numpy/scikit-image/mediapipe pin failed; A1111 startup may break"
 
 ensure_comfyui_torch
 ensure_comfyui_deps
 configure_comfyui_run_gpu
 
-# Start A1111 WebUI
-(cd "$WEBUI_DIR" && bash webui.sh -f) &
+# Start A1111 WebUI (constrain every pip install it triggers so ControlNet's
+# extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
+(cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
 # Start ComfyUI
 /workspace/run_gpu.sh &
