@@ -284,14 +284,41 @@ echo "ComfyUI: CUDA not available; pinning PyTorch 2.8.0+cu128 to match base ima
 "$COMFYUI_DIR/venv/bin/pip" install -q \
   "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
   --index-url https://download.pytorch.org/whl/cu128
+elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torchvision; from torchvision.ops import nms" 2>/dev/null; then
+# torchvision's compiled ops (torchvision::nms) fail to register when it was
+# built against a different torch than the one installed. On a restart the venv
+# is reused as-is, so a drifted torchvision (often dragged in by a custom node)
+# crashes ComfyUI at `import torchvision` with
+# "RuntimeError: operator torchvision::nms does not exist". Re-pin the matched trio.
+echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch/torchvision/torchaudio 2.8.0/0.23.0/2.8.0+cu128..." >&2
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
+rm -rf "$COMFY_SITE"/torchvision "$COMFY_SITE"/torchvision-*.dist-info
+shopt -s nullglob
+for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
+  --index-url https://download.pytorch.org/whl/cu128
+fi
+# Final guard: surface a loud, greppable error if the stack is still broken.
+if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
+echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2
+echo "ERROR:   Expected torch==2.8.0+cu128 paired with torchvision==0.23.0 (CUDA available)." >&2
+"$COMFYUI_DIR/venv/bin/python" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
 fi
 fi
 
 # Start A1111 WebUI
 (cd "$WEBUI_DIR" && bash webui.sh -f) &
 
-# Start ComfyUI
-/workspace/run_gpu.sh &
+# Start ComfyUI (wrap so a crash is logged loudly — its traceback can scroll
+# far above the prompt, so make the failure obvious and greppable in pod logs).
+(
+  set +e
+  /workspace/run_gpu.sh
+  rc=$?
+  echo "ERROR: ComfyUI (port 8188) exited unexpectedly (exit code ${rc}). See the traceback above; a torch/torchvision mismatch is the usual cause." >&2
+) &
 
 # Start File Browser
 filebrowser --database "$FB_DB" &

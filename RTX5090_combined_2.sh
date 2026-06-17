@@ -76,27 +76,51 @@ fi
 chmod +x "$run_gpu"
 }
 
+reinstall_comfyui_torch_stack() {
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+}
+
 ensure_comfyui_torch() {
 local comfy_site="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
-[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
 
 cleanup_pip_tilde_dirs "$comfy_site"
 
-if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch" 2>/dev/null; then
+if ! "$py" -c "import torch" 2>/dev/null; then
 echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu128..."
 "$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
 rm -rf "$comfy_site"/torch "$comfy_site"/torch.lib "$comfy_site"/functorch \
   "$comfy_site"/torchvision "$comfy_site"/torchaudio \
   "$comfy_site"/torch-*.dist-info "$comfy_site"/torchvision-*.dist-info "$comfy_site"/torchaudio-*.dist-info
 cleanup_pip_tilde_dirs "$comfy_site"
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
-  --index-url "$TORCH_INDEX_URL"
-elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+reinstall_comfyui_torch_stack
+elif ! "$py" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
 echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu128 to match base image..."
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
-  --index-url "$TORCH_INDEX_URL"
+reinstall_comfyui_torch_stack
+elif ! "$py" -c "import torchvision; from torchvision.ops import nms" 2>/dev/null; then
+# torchvision's compiled ops (e.g. torchvision::nms) fail to register when it
+# was built against a different torch than the one installed. On a restart the
+# venv is reused as-is, so a drifted torchvision (often dragged in by a custom
+# node) crashes ComfyUI at `import torchvision` with
+# "RuntimeError: operator torchvision::nms does not exist". Re-pin the matched
+# torch/torchvision/torchaudio trio so they share an ABI again.
+echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch==${TORCH_VERSION}/torchvision==${TORCHVISION_VERSION}/torchaudio==${TORCHAUDIO_VERSION}+cu128..." >&2
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
+rm -rf "$comfy_site"/torchvision "$comfy_site"/torchvision-*.dist-info
+cleanup_pip_tilde_dirs "$comfy_site"
+reinstall_comfyui_torch_stack
+fi
+
+# Final guard: if the stack is still broken after repair attempts, surface a
+# loud, greppable error in the pod logs instead of letting ComfyUI crash later
+# with only a deep traceback.
+if ! "$py" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
+echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2
+echo "ERROR:   Expected torch==${TORCH_VERSION}+cu128 paired with torchvision==${TORCHVISION_VERSION} (CUDA available)." >&2
+"$py" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
 fi
 }
 
@@ -318,8 +342,14 @@ configure_comfyui_run_gpu
 # extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
 (cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
-# Start ComfyUI
-/workspace/run_gpu.sh &
+# Start ComfyUI (wrap so a crash is logged loudly — its traceback can scroll
+# far above the prompt, so make the failure obvious and greppable in pod logs).
+(
+  set +e
+  /workspace/run_gpu.sh
+  rc=$?
+  echo "ERROR: ComfyUI (port 8188) exited unexpectedly (exit code ${rc}). See the traceback above; a torch/torchvision mismatch is the usual cause." >&2
+) &
 
 # Start File Browser
 filebrowser --database "$FB_DB" &
