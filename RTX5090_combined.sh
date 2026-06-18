@@ -22,6 +22,12 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
+# cuDNN that ships with torch 2.8.0+cu128. The Blackwell base image is the
+# cuda12.8.1-cudnn-devel variant, which already exposes a system libcudnn.so.9,
+# so this is normally a no-op — it only kicks in as a safety net if a venv torch
+# ever can't load cuDNN (the --system-site-packages venv otherwise inherits the
+# base image's nvidia-cudnn-cu12 metadata without the library being copied in).
+CUDNN_VERSION="9.10.2.21"
 
 # ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
@@ -134,6 +140,26 @@ JSEOF
 }
 
 # ------------------------------------------------------------------------------
+# ensure_comfyui_cudnn — guarantee libcudnn.so.9 is loadable by the venv torch.
+# The ComfyUI venv is created with --system-site-packages, so pip treats the base
+# image's nvidia-cudnn-cu12 as "already satisfied" and never copies libcudnn.so.9
+# into the venv. The Blackwell base (cuda12.8.1-cudnn-devel) ships system cuDNN on
+# the loader path, so torch normally still imports — but if it ever can't find
+# libcudnn.so.9, force the matching cuDNN wheel into the venv (its lib dir precedes
+# system on sys.path). Conditional + idempotent: a no-op when torch imports fine.
+# ------------------------------------------------------------------------------
+ensure_comfyui_cudnn() {
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
+"$py" -c "import torch" 2>/dev/null && return 0
+if "$py" -c "import torch" 2>&1 | grep -q 'libcudnn\.so\.9'; then
+echo "ComfyUI: torch can't find libcudnn.so.9; installing nvidia-cudnn-cu12==${CUDNN_VERSION} into venv..."
+"$COMFYUI_DIR/venv/bin/pip" install -q --force-reinstall --no-deps "nvidia-cudnn-cu12==${CUDNN_VERSION}" \
+  || echo "WARNING: nvidia-cudnn-cu12 install failed; ComfyUI may not start" >&2
+fi
+}
+
+# ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
@@ -182,6 +208,9 @@ fi
 
 # Self-heal ComfyUI PyTorch: partial cu130/cu128 upgrades leave torch without libs (libtorch_global_deps.so).
 if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
+# Fix the cuDNN-only case first so a missing libcudnn.so.9 doesn't trigger a
+# wasteful full torch uninstall/reinstall below.
+ensure_comfyui_cudnn
 if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch" 2>/dev/null; then
 echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==2.8.0+cu128..."
 "$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
@@ -215,6 +244,8 @@ shopt -u nullglob
   "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
   --index-url https://download.pytorch.org/whl/cu128
 fi
+# A bare torch reinstall still skips the system-satisfied cuDNN, so re-ensure it.
+ensure_comfyui_cudnn
 # Final guard: surface a loud, greppable error if the stack is still broken.
 if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
 echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2

@@ -32,6 +32,12 @@ TORCH_VERSION="2.4.0"
 TORCHVISION_VERSION="0.19.0"
 TORCHAUDIO_VERSION="2.4.0"
 TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+# cuDNN that ships with torch 2.4.0+cu124. The Ada base image is cuda12.4.1-devel
+# (NOT a -cudnn- variant), so it carries nvidia-cudnn-cu12 only as dist-info
+# metadata in the system site-packages — pip then marks it "already satisfied"
+# and never copies libcudnn.so.9 into the --system-site-packages venv, crashing
+# ComfyUI at `import torch`. Pin the matching wheel so it can be forced into venv.
+CUDNN_VERSION="9.1.0.70"
 
 # ------------------------------------------------------------------------------
 # cleanup_pip_tilde_dirs — remove ~umpy / ~orch-* from interrupted pip installs
@@ -72,6 +78,27 @@ echo "Installing ComfyUI PyTorch ${TORCH_VERSION}+cu124 (pinned)..."
 "$COMFYUI_DIR/venv/bin/pip" install \
   "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
   --index-url "$TORCH_INDEX_URL"
+ensure_comfyui_cudnn
+}
+
+# ------------------------------------------------------------------------------
+# ensure_comfyui_cudnn — guarantee libcudnn.so.9 is loadable by the venv torch.
+# Because the venv is created with --system-site-packages, pip sees the base
+# image's nvidia-cudnn-cu12 as "already satisfied" and skips installing it into
+# the venv. On the Ada base (cuda12.4.1-devel, no system cuDNN) torch then can't
+# find libcudnn.so.9 and ComfyUI dies at `import torch`. Force the matching cuDNN
+# wheel into the venv (its lib dir precedes system dist-packages on sys.path).
+# Conditional + idempotent: a no-op whenever torch already imports cleanly.
+# ------------------------------------------------------------------------------
+ensure_comfyui_cudnn() {
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
+"$py" -c "import torch" 2>/dev/null && return 0
+if "$py" -c "import torch" 2>&1 | grep -q 'libcudnn\.so\.9'; then
+echo "ComfyUI: torch can't find libcudnn.so.9; installing nvidia-cudnn-cu12==${CUDNN_VERSION} into venv..."
+"$COMFYUI_DIR/venv/bin/pip" install -q --force-reinstall --no-deps "nvidia-cudnn-cu12==${CUDNN_VERSION}" \
+  || echo "WARNING: nvidia-cudnn-cu12 install failed; ComfyUI may not start" >&2
+fi
 }
 
 # ------------------------------------------------------------------------------
@@ -93,6 +120,8 @@ reinstall_comfyui_torch_stack() {
 "$COMFYUI_DIR/venv/bin/pip" install -q \
   "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
   --index-url "$TORCH_INDEX_URL"
+# A bare torch reinstall still skips the system-satisfied cuDNN, so re-ensure it.
+ensure_comfyui_cudnn
 }
 
 ensure_comfyui_torch() {
@@ -101,6 +130,10 @@ local py="$COMFYUI_DIR/venv/bin/python"
 [ -x "$py" ] || return 0
 
 cleanup_pip_tilde_dirs "$comfy_site"
+
+# Fix the common case first (torch fine, only cuDNN missing) so we don't trigger
+# a wasteful full torch uninstall/reinstall just to recover libcudnn.so.9.
+ensure_comfyui_cudnn
 
 if ! "$py" -c "import torch" 2>/dev/null; then
 echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu124..."
