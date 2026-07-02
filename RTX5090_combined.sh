@@ -112,67 +112,116 @@ reinstall_comfyui_torch_stack() {
 ensure_comfyui_cudnn
 }
 
-ensure_comfyui_torch() {
+# ------------------------------------------------------------------------------
+# comfyui_health — classify the ComfyUI venv in a SINGLE python process.
+# On Blackwell a cold `import torch` costs minutes, so probing the stack with the
+# old 5+ separate `python -c "import torch..."` calls wasted ~15 min on a healthy
+# restart. This imports torch exactly ONCE and prints two space-separated tokens:
+#   <torch_status> <deps_status>
+#     torch: ok | cudnn_missing | torch_broken | cuda_unavailable | torchvision_mismatch
+#     deps : ok | missing   (filelock/yaml/numpy/torchsde presence via find_spec —
+#                            no import, so it never triggers a second torch load)
+# ------------------------------------------------------------------------------
+comfyui_health() {
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || { echo "torch_broken ok"; return 0; }
+"$py" - <<'PYEOF' 2>/dev/null
+import importlib.util as _u
+torch_status = "ok"
+try:
+    import torch
+except Exception as e:
+    torch_status = "cudnn_missing" if "libcudnn.so.9" in str(e) else "torch_broken"
+if torch_status == "ok":
+    if not torch.cuda.is_available():
+        torch_status = "cuda_unavailable"
+    else:
+        try:
+            import torchvision
+            from torchvision.ops import nms  # noqa: F401
+        except Exception:
+            torch_status = "torchvision_mismatch"
+def _has(m):
+    try:
+        return _u.find_spec(m) is not None
+    except Exception:
+        return False
+deps_status = "ok" if all(_has(m) for m in ("filelock", "yaml", "numpy", "torchsde")) else "missing"
+print(torch_status, deps_status)
+PYEOF
+}
+
+ensure_comfyui_stack() {
 local comfy_site="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
 local py="$COMFYUI_DIR/venv/bin/python"
 [ -x "$py" ] || return 0
 
 cleanup_pip_tilde_dirs "$comfy_site"
 
-# Fix the common case first (torch fine, only cuDNN missing) so we don't trigger
-# a wasteful full torch uninstall/reinstall just to recover libcudnn.so.9.
-ensure_comfyui_cudnn
+# ONE cold `import torch` classifies torch + torchvision + cuDNN + runtime deps.
+local torch_status deps_status
+read -r torch_status deps_status <<< "$(comfyui_health)"
+# An empty result means the probe process itself died (e.g. torch segfault) —
+# treat it as a broken stack so the repair path runs.
+[ -z "$torch_status" ] && torch_status="torch_broken"
+[ -z "$deps_status" ] && deps_status="ok"
 
-if ! "$py" -c "import torch" 2>/dev/null; then
-echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu128..."
-"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
-rm -rf "$comfy_site"/torch "$comfy_site"/torch.lib "$comfy_site"/functorch \
-  "$comfy_site"/torchvision "$comfy_site"/torchaudio \
-  "$comfy_site"/torch-*.dist-info "$comfy_site"/torchvision-*.dist-info "$comfy_site"/torchaudio-*.dist-info
-cleanup_pip_tilde_dirs "$comfy_site"
-reinstall_comfyui_torch_stack
-elif ! "$py" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu128 to match base image..."
-reinstall_comfyui_torch_stack
-elif ! "$py" -c "import torchvision; from torchvision.ops import nms" 2>/dev/null; then
-# torchvision's compiled ops (e.g. torchvision::nms) fail to register when it
-# was built against a different torch than the one installed. On a restart the
-# venv is reused as-is, so a drifted torchvision (often dragged in by a custom
-# node) crashes ComfyUI at `import torchvision` with
-# "RuntimeError: operator torchvision::nms does not exist". Re-pin the matched
-# torch/torchvision/torchaudio trio so they share an ABI again.
-echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch==${TORCH_VERSION}/torchvision==${TORCHVISION_VERSION}/torchaudio==${TORCHAUDIO_VERSION}+cu128..." >&2
-"$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
-rm -rf "$comfy_site"/torchvision "$comfy_site"/torchvision-*.dist-info
-cleanup_pip_tilde_dirs "$comfy_site"
-reinstall_comfyui_torch_stack
-fi
+case "$torch_status" in
+ok)
+  : # torch/torchvision/cuDNN all healthy — no repair needed
+  ;;
+cudnn_missing)
+  echo "ComfyUI: torch can't find libcudnn.so.9; installing nvidia-cudnn-cu12==${CUDNN_VERSION} into venv..."
+  "$COMFYUI_DIR/venv/bin/pip" install -q --force-reinstall --no-deps "nvidia-cudnn-cu12==${CUDNN_VERSION}" \
+    || echo "WARNING: nvidia-cudnn-cu12 install failed; ComfyUI may not start" >&2
+  ;;
+torch_broken)
+  echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu128..."
+  "$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
+  rm -rf "$comfy_site"/torch "$comfy_site"/torch.lib "$comfy_site"/functorch \
+    "$comfy_site"/torchvision "$comfy_site"/torchaudio \
+    "$comfy_site"/torch-*.dist-info "$comfy_site"/torchvision-*.dist-info "$comfy_site"/torchaudio-*.dist-info
+  cleanup_pip_tilde_dirs "$comfy_site"
+  reinstall_comfyui_torch_stack
+  ;;
+cuda_unavailable)
+  echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu128 to match base image..."
+  reinstall_comfyui_torch_stack
+  ;;
+torchvision_mismatch)
+  # torchvision's compiled ops (e.g. torchvision::nms) fail to register when it
+  # was built against a different torch than the one installed — often dragged in
+  # by a custom node. Re-pin the matched trio so they share an ABI again.
+  echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch==${TORCH_VERSION}/torchvision==${TORCHVISION_VERSION}/torchaudio==${TORCHAUDIO_VERSION}+cu128..." >&2
+  "$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
+  rm -rf "$comfy_site"/torchvision "$comfy_site"/torchvision-*.dist-info
+  cleanup_pip_tilde_dirs "$comfy_site"
+  reinstall_comfyui_torch_stack
+  ;;
+esac
 
-# Final guard: if the stack is still broken after repair attempts, surface a
-# loud, greppable error in the pod logs instead of letting ComfyUI crash later
-# with only a deep traceback.
-if ! "$py" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
-echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2
-echo "ERROR:   Expected torch==${TORCH_VERSION}+cu128 paired with torchvision==${TORCHVISION_VERSION} (CUDA available)." >&2
-"$py" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
-fi
-}
-
-ensure_comfyui_deps() {
-# On a fast restart the venv is reused as-is. If ComfyUI was updated to a newer
-# checkout that needs packages the old venv lacks (e.g. `filelock` for the new
-# app.database layer), main.py crashes on import before the server ever starts.
-# Probe the imports ComfyUI needs at boot and, only if something is missing,
-# reinstall the filtered requirements so we don't pay for it on a healthy venv.
-[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
-if "$COMFYUI_DIR/venv/bin/python" -c "import filelock, yaml, numpy, torchsde" 2>/dev/null; then
-return 0
-fi
+# Runtime deps (filelock/yaml/numpy/torchsde): reinstall requirements only if the
+# probe found something missing, or if we just rebuilt a broken torch (which can
+# take deps down with it). A healthy venv pays nothing here.
+if [ "$deps_status" = "missing" ] || [ "$torch_status" = "torch_broken" ]; then
 echo "ComfyUI: missing runtime deps detected; reinstalling requirements..."
-cleanup_pip_tilde_dirs "$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+cleanup_pip_tilde_dirs "$comfy_site"
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
 if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
 pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
+fi
+
+# Final guard: only pay for a second probe (extra cold import) if we actually
+# attempted a repair. Surfaces a loud, greppable error if the stack is still bad.
+if [ "$torch_status" != "ok" ]; then
+local recheck _deps
+read -r recheck _deps <<< "$(comfyui_health)"
+if [ "$recheck" != "ok" ]; then
+echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts (status=${recheck:-unknown}); ComfyUI will likely fail to start." >&2
+echo "ERROR:   Expected torch==${TORCH_VERSION}+cu128 paired with torchvision==${TORCHVISION_VERSION} (CUDA available)." >&2
+"$py" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
+fi
 fi
 }
 
@@ -319,6 +368,60 @@ JSEOF
 }
 
 # ------------------------------------------------------------------------------
+# ensure_a1111_deps — hold A1111's fragile deps at known-good versions, but only
+# touch pip when they've actually drifted. typing_extensions>=4.12.2 is needed by
+# gradio; numpy/scikit-image/mediapipe are pinned because ControlNet's installer
+# otherwise pulls an ABI-mismatched numpy/skimage combo that crashes A1111 at
+# `from skimage import exposure`. The constraints file is (re)written every boot
+# because ControlNet's own pip installs during webui.sh read it via PIP_CONSTRAINT.
+# A single python probe replaces the old unconditional --force-reinstall, which
+# reinstalled these on every restart even when nothing had changed.
+# ------------------------------------------------------------------------------
+ensure_a1111_deps() {
+local py="$WEBUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
+cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
+
+# Always refresh the constraints file — webui.sh's extension installers read it.
+cat > "$A1111_PIP_CONSTRAINTS" << 'EOF'
+numpy==1.26.2
+scikit-image==0.21.0
+mediapipe==0.10.14
+EOF
+
+# Skip all pip work if the pinned versions are already in place (ONE probe).
+if "$py" - <<'PYEOF' 2>/dev/null
+import sys
+import importlib.metadata as md
+def ver(m):
+    try:
+        return md.version(m)
+    except Exception:
+        return None
+def ge(v, target):
+    if not v:
+        return False
+    cur = tuple(int(x) for x in v.split(".")[:3] if x.isdigit())
+    return cur >= target
+ok = (ge(ver("typing_extensions"), (4, 12, 2))
+      and ver("numpy") == "1.26.2"
+      and ver("scikit-image") == "0.21.0"
+      and ver("mediapipe") == "0.10.14")
+sys.exit(0 if ok else 1)
+PYEOF
+then
+return 0
+fi
+
+echo "A1111: pinning typing_extensions/numpy/scikit-image/mediapipe (drift detected)..."
+"$py" -m pip install -q "typing_extensions>=4.12.2" \
+  || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
+PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" "$py" -m pip install -q \
+  "numpy==1.26.2" "scikit-image==0.21.0" "mediapipe==0.10.14" \
+  || echo "WARNING: numpy/scikit-image/mediapipe pin failed; A1111 startup may break"
+}
+
+# ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
@@ -345,36 +448,11 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
-cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
-
-"$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
-  || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
-
-# ControlNet's installer can leave a numpy/scikit-image combo with mismatched
-# binary ABI (skimage compiled for one numpy major, a different numpy installed),
-# which crashes A1111 at `from skimage import exposure`. Pinning here alone is
-# NOT enough: ControlNet's own pip installs run *during* webui.sh launch (after
-# this point) and pull a numpy-2 build of scikit-image on top of numpy 1.26.2.
-# A pip constraints file (exported as PIP_CONSTRAINT below) forces every pip
-# invocation during A1111 startup — including the extension installers — to keep
-# these versions, so the ABI can't drift. mediapipe is pinned because recent
-# releases (0.10.31+) dropped the legacy `solutions` API controlnet_aux needs.
-cat > "$A1111_PIP_CONSTRAINTS" << 'EOF'
-numpy==1.26.2
-scikit-image==0.21.0
-mediapipe==0.10.14
-EOF
-PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" "$WEBUI_DIR/venv/bin/pip" install -q \
-  "numpy==1.26.2" "scikit-image==0.21.0" "mediapipe==0.10.14" \
-  || echo "WARNING: numpy/scikit-image/mediapipe pin failed; A1111 startup may break"
-
-ensure_comfyui_torch
-ensure_comfyui_deps
+# --- ComfyUI first: verify/repair its torch stack, then launch it right away so
+# its long custom-node import phase overlaps with A1111's startup below. The two
+# apps use independent venvs, so their prep/boot can safely run concurrently. ---
+ensure_comfyui_stack
 configure_comfyui_run_gpu
-
-# Start A1111 WebUI (constrain every pip install it triggers so ControlNet's
-# extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
-(cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
 # Start ComfyUI (wrap so a crash is logged loudly — its traceback can scroll
 # far above the prompt, so make the failure obvious and greppable in pod logs).
@@ -384,6 +462,14 @@ configure_comfyui_run_gpu
   rc=$?
   echo "ERROR: ComfyUI (port 8188) exited unexpectedly (exit code ${rc}). See the traceback above; a torch/torchvision mismatch is the usual cause." >&2
 ) &
+
+# --- A1111: pin its fragile deps (only if they actually drifted), then launch.
+# Runs concurrently with ComfyUI's boot above. ---
+ensure_a1111_deps
+
+# Start A1111 WebUI (constrain every pip install it triggers so ControlNet's
+# extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
+(cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
 # Start File Browser
 filebrowser --database "$FB_DB" &
