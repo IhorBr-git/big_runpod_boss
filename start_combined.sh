@@ -3,9 +3,9 @@
 # -- GPU-aware bootstrap for RunPod combined templates ---
 #
 # Detects the installed RunPod GPU and runs the matching combined install script:
-#   blackwell  → RTX5090_combined_2.sh  (CUDA 12.8 / torch 2.8.0+cu128)
-#   ada        → 4090_combined.sh       (CUDA 12.4 / torch 2.4.0+cu124)
-#   legacy     → 4090_combined.sh       (Hopper/Ampere/Turing — same stack as Ada)
+#   blackwell  → RTX5090_combined.sh    (CUDA 12.8 / torch 2.8.0+cu128)
+#   ada        → RTX4090_combined.sh    (CUDA 12.4 / torch 2.4.0+cu124)
+#   legacy     → RTX4090_combined.sh    (Hopper/Ampere/Turing — same stack as Ada)
 #
 # GPU groups (by architecture / PyTorch wheel compatibility):
 #   Blackwell (sm_120/sm_100): B300, B200, RTX PRO 6000, RTX PRO 4500,
@@ -117,19 +117,19 @@ fi
 
 case "$profile" in
 blackwell)
-SCRIPT="RTX5090_combined_2.sh"
+SCRIPT="RTX5090_combined.sh"
 echo "Selected profile: Blackwell → $SCRIPT"
 echo "  Base image: runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
 echo "  PyTorch pin: 2.8.0+cu128"
 ;;
 ada)
-SCRIPT="4090_combined.sh"
+SCRIPT="RTX4090_combined.sh"
 echo "Selected profile: Ada Lovelace → $SCRIPT"
 echo "  Base image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 echo "  PyTorch pin: 2.4.0+cu124"
 ;;
 legacy)
-SCRIPT="4090_combined.sh"
+SCRIPT="RTX4090_combined.sh"
 echo "Selected profile: Legacy/Hopper/Ampere/Turing/datacenter → $SCRIPT"
 echo "  Base image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
 echo "  WARNING: Blackwell GPUs must use the 5090 template, not this stack."

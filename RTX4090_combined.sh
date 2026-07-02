@@ -15,7 +15,7 @@
 #
 # Container Start Command (must use bash -c on RunPod):
 #   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh'
-#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/RTX4090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
 #
 # Force full reinstall on a pod with existing /workspace: FORCE_FULL_INSTALL=1 ./install_script.sh
 

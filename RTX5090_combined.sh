@@ -6,15 +6,17 @@
 # This script installs and launches BOTH:
 #   - AUTOMATIC1111 Stable Diffusion WebUI  (port 3000)
 #   - ComfyUI                               (port 8188)
-#   - File Browser                           (port 8080)
+#   - File Browser                         (port 8080)
 # on a single RunPod pod optimized for RTX 5090 (Blackwell architecture).
 #
 # On pod restart (both dirs already exist) the script skips installation
-# entirely and goes straight to starting services — same logic as the
-# individual container start commands.
+# entirely and goes straight to starting services.
 #
-# Container Start Command (use the script for both fresh install and restart):
-#   cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/main/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh
+# Recommended RunPod bootstrap (must use bash -c on RunPod):
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/start_combined.sh -O start_combined.sh && chmod +x start_combined.sh && ./start_combined.sh'
+#   bash -c 'cd /workspace && wget -q https://raw.githubusercontent.com/IhorBr-git/big_runpod_boss/refs/heads/test/RTX5090_combined.sh -O install_script.sh && chmod +x install_script.sh && ./install_script.sh'
+#
+# Force full reinstall: FORCE_FULL_INSTALL=1 ./install_script.sh
 
 set -e
 
@@ -22,12 +24,157 @@ WEBUI_DIR="/workspace/stable-diffusion-webui"
 COMFYUI_DIR="/workspace/ComfyUI"
 MODELS_DIR="/workspace/models"
 FB_DB="/workspace/.filebrowser.db"
-# cuDNN that ships with torch 2.8.0+cu128. The Blackwell base image is the
-# cuda12.8.1-cudnn-devel variant, which already exposes a system libcudnn.so.9,
-# so this is normally a no-op — it only kicks in as a safety net if a venv torch
-# ever can't load cuDNN (the --system-site-packages venv otherwise inherits the
-# base image's nvidia-cudnn-cu12 metadata without the library being copied in).
+A1111_PIP_CONSTRAINTS="/workspace/a1111-pip-constraints.txt"
+FORCE_FULL_INSTALL="${FORCE_FULL_INSTALL:-0}"
+
+TORCH_VERSION="2.8.0"
+TORCHVISION_VERSION="0.23.0"
+TORCHAUDIO_VERSION="2.8.0"
+TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
+# cuDNN that ships with torch 2.8.0+cu128. The --system-site-packages venv makes
+# pip mark the base image's nvidia-cudnn-cu12 "already satisfied" and skip copying
+# libcudnn.so.9 into the venv. The Blackwell base (cuda12.8.1-cudnn-devel) exposes
+# system cuDNN on the loader path, so torch normally still imports — but pin the
+# matching wheel so it can be forced into the venv if cuDNN ever can't be found.
 CUDNN_VERSION="9.10.2.21"
+
+cleanup_pip_tilde_dirs() {
+local site_dir="$1"
+[ -d "$site_dir" ] || return 0
+shopt -s nullglob
+for _bad in "$site_dir"/~*; do rm -rf "$_bad"; done
+shopt -u nullglob
+}
+
+pip_install_filtered_reqs() {
+local pip_bin="$1"
+local req_file="$2"
+local filtered
+filtered="$(mktemp)"
+grep -v -E '^\s*(torch|torchvision|torchaudio|xformers|triton)\s*($|[><=!~;#])' "$req_file" > "$filtered"
+if [ -s "$filtered" ]; then
+"$pip_bin" install -r "$filtered"
+fi
+rm -f "$filtered"
+}
+
+setup_comfyui_venv() {
+echo "Recreating ComfyUI venv with system-site-packages (GPU-enabled torch)..."
+rm -rf "$COMFYUI_DIR/venv"
+python3.11 -m venv --system-site-packages "$COMFYUI_DIR/venv"
+"$COMFYUI_DIR/venv/bin/pip" install --upgrade pip wheel
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
+echo "Installing ComfyUI PyTorch ${TORCH_VERSION}+cu128 (pinned)..."
+"$COMFYUI_DIR/venv/bin/pip" install \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+ensure_comfyui_cudnn
+}
+
+# ------------------------------------------------------------------------------
+# ensure_comfyui_cudnn — guarantee libcudnn.so.9 is loadable by the venv torch.
+# Because the venv is created with --system-site-packages, pip sees the base
+# image's nvidia-cudnn-cu12 as "already satisfied" and skips installing it into
+# the venv. The Blackwell base (cuda12.8.1-cudnn-devel) ships system cuDNN on the
+# loader path, so torch normally imports fine — but if it ever can't find
+# libcudnn.so.9, force the matching cuDNN wheel into the venv (its lib dir
+# precedes system dist-packages on sys.path). Conditional + idempotent: a no-op
+# whenever torch already imports cleanly.
+# ------------------------------------------------------------------------------
+ensure_comfyui_cudnn() {
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
+"$py" -c "import torch" 2>/dev/null && return 0
+if "$py" -c "import torch" 2>&1 | grep -q 'libcudnn\.so\.9'; then
+echo "ComfyUI: torch can't find libcudnn.so.9; installing nvidia-cudnn-cu12==${CUDNN_VERSION} into venv..."
+"$COMFYUI_DIR/venv/bin/pip" install -q --force-reinstall --no-deps "nvidia-cudnn-cu12==${CUDNN_VERSION}" \
+  || echo "WARNING: nvidia-cudnn-cu12 install failed; ComfyUI may not start" >&2
+fi
+}
+
+configure_comfyui_run_gpu() {
+local run_gpu="/workspace/run_gpu.sh"
+[ -f "$run_gpu" ] || return 0
+if ! grep -q -- '--listen' "$run_gpu"; then
+sed -i '$ s/$/ --listen /' "$run_gpu"
+fi
+if ! grep -q -- 'enable-cors-header' "$run_gpu"; then
+sed -i '$ s/$/ --enable-cors-header '"'"'*'"'"' /' "$run_gpu"
+fi
+chmod +x "$run_gpu"
+}
+
+reinstall_comfyui_torch_stack() {
+"$COMFYUI_DIR/venv/bin/pip" install -q \
+  "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" "torchaudio==${TORCHAUDIO_VERSION}" \
+  --index-url "$TORCH_INDEX_URL"
+# A bare torch reinstall still skips the system-satisfied cuDNN, so re-ensure it.
+ensure_comfyui_cudnn
+}
+
+ensure_comfyui_torch() {
+local comfy_site="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+local py="$COMFYUI_DIR/venv/bin/python"
+[ -x "$py" ] || return 0
+
+cleanup_pip_tilde_dirs "$comfy_site"
+
+# Fix the common case first (torch fine, only cuDNN missing) so we don't trigger
+# a wasteful full torch uninstall/reinstall just to recover libcudnn.so.9.
+ensure_comfyui_cudnn
+
+if ! "$py" -c "import torch" 2>/dev/null; then
+echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==${TORCH_VERSION}+cu128..."
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
+rm -rf "$comfy_site"/torch "$comfy_site"/torch.lib "$comfy_site"/functorch \
+  "$comfy_site"/torchvision "$comfy_site"/torchaudio \
+  "$comfy_site"/torch-*.dist-info "$comfy_site"/torchvision-*.dist-info "$comfy_site"/torchaudio-*.dist-info
+cleanup_pip_tilde_dirs "$comfy_site"
+reinstall_comfyui_torch_stack
+elif ! "$py" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+echo "ComfyUI: CUDA not available; pinning PyTorch ${TORCH_VERSION}+cu128 to match base image..."
+reinstall_comfyui_torch_stack
+elif ! "$py" -c "import torchvision; from torchvision.ops import nms" 2>/dev/null; then
+# torchvision's compiled ops (e.g. torchvision::nms) fail to register when it
+# was built against a different torch than the one installed. On a restart the
+# venv is reused as-is, so a drifted torchvision (often dragged in by a custom
+# node) crashes ComfyUI at `import torchvision` with
+# "RuntimeError: operator torchvision::nms does not exist". Re-pin the matched
+# torch/torchvision/torchaudio trio so they share an ABI again.
+echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch==${TORCH_VERSION}/torchvision==${TORCHVISION_VERSION}/torchaudio==${TORCHAUDIO_VERSION}+cu128..." >&2
+"$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
+rm -rf "$comfy_site"/torchvision "$comfy_site"/torchvision-*.dist-info
+cleanup_pip_tilde_dirs "$comfy_site"
+reinstall_comfyui_torch_stack
+fi
+
+# Final guard: if the stack is still broken after repair attempts, surface a
+# loud, greppable error in the pod logs instead of letting ComfyUI crash later
+# with only a deep traceback.
+if ! "$py" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
+echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2
+echo "ERROR:   Expected torch==${TORCH_VERSION}+cu128 paired with torchvision==${TORCHVISION_VERSION} (CUDA available)." >&2
+"$py" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
+fi
+}
+
+ensure_comfyui_deps() {
+# On a fast restart the venv is reused as-is. If ComfyUI was updated to a newer
+# checkout that needs packages the old venv lacks (e.g. `filelock` for the new
+# app.database layer), main.py crashes on import before the server ever starts.
+# Probe the imports ComfyUI needs at boot and, only if something is missing,
+# reinstall the filtered requirements so we don't pay for it on a healthy venv.
+[ -x "$COMFYUI_DIR/venv/bin/python" ] || return 0
+if "$COMFYUI_DIR/venv/bin/python" -c "import filelock, yaml, numpy, torchsde" 2>/dev/null; then
+return 0
+fi
+echo "ComfyUI: missing runtime deps detected; reinstalling requirements..."
+cleanup_pip_tilde_dirs "$COMFYUI_DIR/venv/lib/python3.11/site-packages"
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/requirements.txt"
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+fi
+}
 
 # ------------------------------------------------------------------------------
 # ensure_vram_guard — create the VRAM Guard extension if it doesn't exist yet.
@@ -39,6 +186,8 @@ mkdir -p "$WEBUI_DIR/extensions/vram-guard/scripts"
 mkdir -p "$WEBUI_DIR/extensions/vram-guard/javascript"
 cat > "$WEBUI_DIR/extensions/vram-guard/scripts/vram_guard.py" << 'PYEOF'
 import gc
+import threading
+import time
 import torch
 from modules import script_callbacks, shared, sd_models
 
@@ -80,6 +229,33 @@ def _reload_model():
     return _vram_str()
 
 
+def _model_is_loaded():
+    # Read the stored model reference WITHOUT touching shared.sd_model, whose
+    # lazy getter would force a checkpoint load — the opposite of what we want.
+    try:
+        return sd_models.model_data.sd_model is not None
+    except Exception:
+        return False
+
+
+def _boot_unload_worker():
+    # A1111 preloads the checkpoint into VRAM at startup. Wait for that initial
+    # load to land, then unload it once so the pod boots with the full GPU free.
+    # The model is transparently reloaded on the first generation (or via the
+    # Reload button). We never yank VRAM out from under an active job.
+    deadline = time.time() + 180
+    while time.time() < deadline:
+        time.sleep(5)
+        try:
+            if getattr(shared.state, "job_count", 0) > 0:
+                continue
+        except Exception:
+            pass
+        if _model_is_loaded():
+            print("[vram-guard] boot unload: " + _unload_all(), flush=True)
+            return
+
+
 def _add_api(_demo, app):
     @app.post("/vram-guard/unload-all")
     async def api_unload_all():
@@ -88,6 +264,9 @@ def _add_api(_demo, app):
     @app.post("/vram-guard/reload")
     async def api_reload():
         return {"vram": _reload_model()}
+
+    # Free VRAM on pod boot by default.
+    threading.Thread(target=_boot_unload_worker, daemon=True).start()
 
 script_callbacks.on_app_started(_add_api)
 PYEOF
@@ -140,26 +319,6 @@ JSEOF
 }
 
 # ------------------------------------------------------------------------------
-# ensure_comfyui_cudnn — guarantee libcudnn.so.9 is loadable by the venv torch.
-# The ComfyUI venv is created with --system-site-packages, so pip treats the base
-# image's nvidia-cudnn-cu12 as "already satisfied" and never copies libcudnn.so.9
-# into the venv. The Blackwell base (cuda12.8.1-cudnn-devel) ships system cuDNN on
-# the loader path, so torch normally still imports — but if it ever can't find
-# libcudnn.so.9, force the matching cuDNN wheel into the venv (its lib dir precedes
-# system on sys.path). Conditional + idempotent: a no-op when torch imports fine.
-# ------------------------------------------------------------------------------
-ensure_comfyui_cudnn() {
-local py="$COMFYUI_DIR/venv/bin/python"
-[ -x "$py" ] || return 0
-"$py" -c "import torch" 2>/dev/null && return 0
-if "$py" -c "import torch" 2>&1 | grep -q 'libcudnn\.so\.9'; then
-echo "ComfyUI: torch can't find libcudnn.so.9; installing nvidia-cudnn-cu12==${CUDNN_VERSION} into venv..."
-"$COMFYUI_DIR/venv/bin/pip" install -q --force-reinstall --no-deps "nvidia-cudnn-cu12==${CUDNN_VERSION}" \
-  || echo "WARNING: nvidia-cudnn-cu12 install failed; ComfyUI may not start" >&2
-fi
-}
-
-# ------------------------------------------------------------------------------
 # start_services — launches all three processes and waits
 # ------------------------------------------------------------------------------
 start_services() {
@@ -186,76 +345,36 @@ fi
 # Start RunPod handler (only once for both services)
 /start.sh &
 
-# Remove half-renamed pip dirs (e.g. ~umpy) in A1111 venv after interrupted installs.
-WEBUI_SITE="$WEBUI_DIR/venv/lib/python3.11/site-packages"
-if [ -d "$WEBUI_SITE" ]; then
-shopt -s nullglob
-for _bad in "$WEBUI_SITE"/~*; do rm -rf "$_bad"; done
-shopt -u nullglob
-fi
+cleanup_pip_tilde_dirs "$WEBUI_DIR/venv/lib/python3.11/site-packages"
 
-# typing_extensions in venv (TypeIs for gradio/altair) when using --system-site-packages
 "$WEBUI_DIR/venv/bin/pip" install -q --force-reinstall "typing_extensions>=4.12.2" \
   || echo "WARNING: typing_extensions upgrade failed; A1111 may fail to import gradio"
 
-# ComfyUI venv: drop dangling ~orch-* / ~* from failed torch upgrades (see uv/pip warnings).
-COMFY_SITE="$COMFYUI_DIR/venv/lib/python3.11/site-packages"
-if [ -d "$COMFY_SITE" ]; then
-shopt -s nullglob
-for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
-shopt -u nullglob
-fi
+# ControlNet's installer can leave a numpy/scikit-image combo with mismatched
+# binary ABI (skimage compiled for one numpy major, a different numpy installed),
+# which crashes A1111 at `from skimage import exposure`. Pinning here alone is
+# NOT enough: ControlNet's own pip installs run *during* webui.sh launch (after
+# this point) and pull a numpy-2 build of scikit-image on top of numpy 1.26.2.
+# A pip constraints file (exported as PIP_CONSTRAINT below) forces every pip
+# invocation during A1111 startup — including the extension installers — to keep
+# these versions, so the ABI can't drift. mediapipe is pinned because recent
+# releases (0.10.31+) dropped the legacy `solutions` API controlnet_aux needs.
+cat > "$A1111_PIP_CONSTRAINTS" << 'EOF'
+numpy==1.26.2
+scikit-image==0.21.0
+mediapipe==0.10.14
+EOF
+PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" "$WEBUI_DIR/venv/bin/pip" install -q \
+  "numpy==1.26.2" "scikit-image==0.21.0" "mediapipe==0.10.14" \
+  || echo "WARNING: numpy/scikit-image/mediapipe pin failed; A1111 startup may break"
 
-# Self-heal ComfyUI PyTorch: partial cu130/cu128 upgrades leave torch without libs (libtorch_global_deps.so).
-if [ -x "$COMFYUI_DIR/venv/bin/python" ]; then
-# Fix the cuDNN-only case first so a missing libcudnn.so.9 doesn't trigger a
-# wasteful full torch uninstall/reinstall below.
-ensure_comfyui_cudnn
-if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch" 2>/dev/null; then
-echo "ComfyUI: PyTorch import failed (broken partial install); reinstalling torch==2.8.0+cu128..."
-"$COMFYUI_DIR/venv/bin/pip" uninstall -y torch torchvision torchaudio 2>/dev/null || true
-rm -rf "$COMFY_SITE"/torch "$COMFY_SITE"/torch.lib "$COMFY_SITE"/functorch \
-  "$COMFY_SITE"/torchvision "$COMFY_SITE"/torchaudio \
-  "$COMFY_SITE"/torch-*.dist-info "$COMFY_SITE"/torchvision-*.dist-info "$COMFY_SITE"/torchaudio-*.dist-info
-shopt -s nullglob
-for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
-shopt -u nullglob
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-  --index-url https://download.pytorch.org/whl/cu128
-elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-echo "ComfyUI: CUDA not available; pinning PyTorch 2.8.0+cu128 to match base image..."
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-  --index-url https://download.pytorch.org/whl/cu128
-elif ! "$COMFYUI_DIR/venv/bin/python" -c "import torchvision; from torchvision.ops import nms" 2>/dev/null; then
-# torchvision's compiled ops (torchvision::nms) fail to register when it was
-# built against a different torch than the one installed. On a restart the venv
-# is reused as-is, so a drifted torchvision (often dragged in by a custom node)
-# crashes ComfyUI at `import torchvision` with
-# "RuntimeError: operator torchvision::nms does not exist". Re-pin the matched trio.
-echo "ERROR: ComfyUI torchvision is broken/mismatched against torch (operator torchvision::nms unavailable); re-pinning torch/torchvision/torchaudio 2.8.0/0.23.0/2.8.0+cu128..." >&2
-"$COMFYUI_DIR/venv/bin/pip" uninstall -y torchvision 2>/dev/null || true
-rm -rf "$COMFY_SITE"/torchvision "$COMFY_SITE"/torchvision-*.dist-info
-shopt -s nullglob
-for _bad in "$COMFY_SITE"/~*; do rm -rf "$_bad"; done
-shopt -u nullglob
-"$COMFYUI_DIR/venv/bin/pip" install -q \
-  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-  --index-url https://download.pytorch.org/whl/cu128
-fi
-# A bare torch reinstall still skips the system-satisfied cuDNN, so re-ensure it.
-ensure_comfyui_cudnn
-# Final guard: surface a loud, greppable error if the stack is still broken.
-if ! "$COMFYUI_DIR/venv/bin/python" -c "import torch, torchvision; from torchvision.ops import nms; assert torch.cuda.is_available()" 2>/dev/null; then
-echo "ERROR: ComfyUI PyTorch/torchvision stack is still broken after repair attempts; ComfyUI will likely fail to start." >&2
-echo "ERROR:   Expected torch==2.8.0+cu128 paired with torchvision==0.23.0 (CUDA available)." >&2
-"$COMFYUI_DIR/venv/bin/python" -c "import torch, torchvision; print('installed torch=%s torchvision=%s cuda=%s' % (torch.__version__, torchvision.__version__, torch.cuda.is_available()))" 2>&1 | sed 's/^/ERROR:   /' >&2 || true
-fi
-fi
+ensure_comfyui_torch
+ensure_comfyui_deps
+configure_comfyui_run_gpu
 
-# Start A1111 WebUI
-(cd "$WEBUI_DIR" && bash webui.sh -f) &
+# Start A1111 WebUI (constrain every pip install it triggers so ControlNet's
+# extension installers can't reintroduce the numpy/scikit-image ABI mismatch).
+(cd "$WEBUI_DIR" && PIP_CONSTRAINT="$A1111_PIP_CONSTRAINTS" bash webui.sh -f) &
 
 # Start ComfyUI (wrap so a crash is logged loudly — its traceback can scroll
 # far above the prompt, so make the failure obvious and greppable in pod logs).
@@ -276,9 +395,11 @@ wait
 # ==============================================================================
 # Fast restart: if both are already installed, skip straight to startup
 # ==============================================================================
-if [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
+if [ "$FORCE_FULL_INSTALL" = "1" ]; then
+echo "FORCE_FULL_INSTALL=1, running full setup."
+elif [ -d "$WEBUI_DIR" ] && [ -d "$COMFYUI_DIR" ]; then
 echo "Both A1111 and ComfyUI already installed. Skipping installation..."
-rm -f /workspace/install_script.sh
+rm -f /workspace/install_script.sh /workspace/start_combined.sh
 start_services
 exit 0
 fi
@@ -291,6 +412,7 @@ echo "[1/7] Installing system dependencies..."
 echo "========================================"
 apt-get update && apt-get install -y --no-install-recommends \
 wget curl git python3 python3-venv libgl1 libglib2.0-0 google-perftools bc \
+pkg-config libcairo2-dev \
 && rm -rf /var/lib/apt/lists/*
 
 # ==============================================================================
@@ -324,7 +446,7 @@ export STABLE_DIFFUSION_REPO="https://github.com/w-e-w/stablediffusion.git"
 export TORCH_COMMAND="echo 'Torch pre-installed in base image, skipping'"
 # SDP attention uses Flash Attention 2 under the hood in PyTorch 2.0+
 # No xformers needed — avoids version mismatch with base image's dev torch build
-export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --theme=dark"
+export COMMANDLINE_ARGS="--listen --port 3000 --opt-sdp-attention --enable-insecure-extension-access --no-half-vae --no-download-sd-model --api --skip-python-version-check --theme=dark"
 EOF
 
 # ---- Pre-create venv inheriting base image packages (torch 2.8.0, torchvision, CUDA 12.8) ----
@@ -354,6 +476,8 @@ git clone https://github.com/thomasasfk/sd-webui-aspect-ratio-helper.git "$WEBUI
 git clone https://github.com/Coyote-A/ultimate-upscale-for-automatic1111.git "$WEBUI_DIR/extensions/ultimate-upscale" || true
 [ ! -d "$WEBUI_DIR/extensions/lobe-theme" ] && \
 git clone https://github.com/lobehub/sd-webui-lobe-theme.git "$WEBUI_DIR/extensions/lobe-theme" || true
+[ ! -d "$WEBUI_DIR/extensions/sd-webui-controlnet" ] && \
+git clone https://github.com/Mikubill/sd-webui-controlnet.git "$WEBUI_DIR/extensions/sd-webui-controlnet" || true
 # ==============================================================================
 # 3. ComfyUI
 # ==============================================================================
@@ -365,37 +489,53 @@ if [ ! -d "$COMFYUI_DIR" ]; then
 echo "Installing ComfyUI and ComfyUI Manager..."
 cd /workspace
 
-# Download and run the ComfyUI-Manager install script
-wget https://github.com/ltdrdata/ComfyUI-Manager/raw/main/scripts/install-comfyui-venv-linux.sh -O install-comfyui-venv-linux.sh
-chmod +x install-comfyui-venv-linux.sh
-./install-comfyui-venv-linux.sh
+# NOTE: we deliberately do NOT run the upstream install-comfyui-venv-linux.sh.
+# That installer pip-installs a multi-GB cu130 torch into a throwaway venv,
+# which we immediately wipe and replace with the pinned cu128 build in
+# setup_comfyui_venv — ~10 min of bandwidth burned for nothing. Instead we
+# replicate just its useful side effects (clone + run_gpu.sh) by hand.
+git clone https://github.com/comfyanonymous/ComfyUI "$COMFYUI_DIR"
+git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/ltdrdata/ComfyUI-Manager comfyui-manager
 
-# Add the --listen flag to run_gpu.sh for network access
-echo "Configuring ComfyUI for network access..."
-sed -i "$ s/$/ --listen /" /workspace/run_gpu.sh
+# Recreate the GPU launcher the upstream installer would have produced.
+cat > /workspace/run_gpu.sh << 'EOF'
+#!/bin/bash
+cd ComfyUI
+source venv/bin/activate
+python main.py --preview-method auto
+EOF
 chmod +x /workspace/run_gpu.sh
+
+# RunPod proxy needs --listen and --enable-cors-header (host/origin mismatch → HTTP 403)
+echo "Configuring ComfyUI for RunPod network access..."
+configure_comfyui_run_gpu
 
 # Install custom nodes
 echo "Installing ComfyUI custom nodes..."
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/dsigmabcn/comfyui-model-downloader.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/MadiatorLabs/ComfyUI-RunpodDirect.git
 git -C "$COMFYUI_DIR/custom_nodes" clone https://github.com/crystian/ComfyUI-Crystools.git
-"$COMFYUI_DIR/venv/bin/pip" install -r "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
 
-# Clean up ComfyUI installer artifacts
-rm -f /workspace/install-comfyui-venv-linux.sh /workspace/run_cpu.sh
+# Build the venv once with the pinned cu128 torch, then layer node requirements
+# on top (setup_comfyui_venv only covers ComfyUI core requirements.txt).
+setup_comfyui_venv
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
+
+# Clean up any leftover CPU runner from older installs
+rm -f /workspace/run_cpu.sh
 else
 echo "ComfyUI already exists, skipping installation."
+if [ "$FORCE_FULL_INSTALL" = "1" ]; then
+setup_comfyui_venv
+if [ -f "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/comfyui-manager/requirements.txt"
 fi
-
-# Pin PyTorch 2.8.0 + cu128 (same generation as base image runpod/pytorch:2.8.0-cuda12.8).
-# Unpinned `pip install --upgrade torch` can pull 2.10+cu130 and, if interrupted, leave
-# dangling ~orch-*.dist-info and a broken torch (libtorch_global_deps.so missing).
-# For CUDA 13.0+ hosts only, consider newer pins after checking pytorch.org.
-echo "Installing ComfyUI PyTorch 2.8.0+cu128 (pinned)..."
-"$COMFYUI_DIR/venv/bin/pip" install \
-  "torch==2.8.0" "torchvision==0.23.0" "torchaudio==2.8.0" \
-  --index-url https://download.pytorch.org/whl/cu128
+if [ -f "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt" ]; then
+pip_install_filtered_reqs "$COMFYUI_DIR/venv/bin/pip" "$COMFYUI_DIR/custom_nodes/ComfyUI-Crystools/requirements.txt"
+fi
+fi
+fi
 
 # ==============================================================================
 # 4. Shared models directory
@@ -411,7 +551,7 @@ mkdir -p "$MODELS_DIR"
 # Dynamically discover every folder inside ComfyUI/models/ so nothing is missed
 # (checkpoints, clip, clip_vision, controlnet, diffusers, diffusion_models,
 #  embeddings, gligen, hypernetworks, loras, photomaker, style_models,
-#  unet, upscale_models, vae, vae_approx, …and any future additions).
+#  unet, upscale_models, vae, vae_approx, ...and any future additions).
 echo "Symlinking ComfyUI model directories to shared models..."
 for comfy_subdir in "$COMFYUI_DIR/models"/*/; do
 # Skip if the glob matched nothing
@@ -430,7 +570,7 @@ ln -sfn "$shared_subdir" "${comfy_subdir%/}"
 done
 
 # --- A1111: symlink model directories to the same shared location ---
-# Map A1111 folder names → shared folder names (where they differ)
+# Map A1111 folder names -> shared folder names (where they differ)
 echo "Symlinking A1111 model directories to shared models..."
 declare -A A1111_MAP=(
 ["Stable-diffusion"]="checkpoints"
